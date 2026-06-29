@@ -1,0 +1,70 @@
+name: Build macOS app
+
+# Builds the self-contained "Dog Trial Video Clipper.app" on GitHub's macOS
+# runners for both Apple Silicon (arm64) and Intel (x86_64), and uploads each as
+# a downloadable zip. Trigger it by hand (Actions tab -> Run workflow) or by
+# pushing a tag like v1.0.0.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14   # Apple Silicon
+            arch: arm64
+          - runner: macos-13   # Intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Unit tests (shared core, no display needed)
+        run: python tests/test_core.py
+
+      - name: Build the .app
+        run: pyinstaller --noconfirm packaging/Dog_Trial_Video_Clipper.spec
+
+      - name: Smoke-test the frozen app (headless)
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import imageio_ffmpeg, subprocess
+          ff = imageio_ffmpeg.get_ffmpeg_exe()
+          subprocess.run(
+              [ff, "-y", "-f", "lavfi",
+               "-i", "testsrc=size=640x360:rate=30:duration=3",
+               "-pix_fmt", "yuv420p", "selftest.mp4"],
+              check=True,
+          )
+          PY
+          APP="dist/Dog Trial Video Clipper.app/Contents/MacOS/Dog Trial Video Clipper"
+          QT_QPA_PLATFORM=offscreen "$APP" --selftest "$PWD/selftest.mp4"
+
+      - name: Zip the .app (ditto preserves bundle symlinks + metadata)
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent \
+            "Dog Trial Video Clipper.app" \
+            "../DogTrialVideoClipper-macOS-${{ matrix.arch }}.zip"
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: DogTrialVideoClipper-macOS-${{ matrix.arch }}
+          path: DogTrialVideoClipper-macOS-${{ matrix.arch }}.zip
+          if-no-files-found: error

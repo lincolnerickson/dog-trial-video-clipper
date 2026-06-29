@@ -1,0 +1,3 @@
+# Dog Trial Video Clipper dependencies
+PySide6>=6.6        # native desktop GUI + hardware-accelerated 4K video playback
+imageio-ffmpeg>=0.4 # ships an ffmpeg binary so the cutter works with no system install

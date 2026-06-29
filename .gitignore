@@ -1,0 +1,44 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# --- PyInstaller build output ---
+build/
+dist/
+*.app/
+*.manifest
+
+# --- Packaged app zips / self-test artifacts ---
+*.zip
+selftest.mp4
+packaging/icon.icns
+
+# --- Large local media (never commit; multi-GB trial footage / generated samples) ---
+*.mp4
+*.MP4
+*.mov
+*.MOV
+*.m4v
+*.M4V
+*.mts
+*.MTS
+*.m2ts
+*.mxf
+*.avi
+*.wmv
+
+# --- Generated clips / scratch output ---
+clips/
+sample/out/
+tests/_tmp_*/
+running_order.txt
+
+# --- Office temp lockfiles ---
+~$*
+
+# --- Local editor/tool state ---
+.claude/settings.local.json
+.DS_Store

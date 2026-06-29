@@ -1,0 +1,14 @@
+# Normalize line endings. Default everything text to LF so the macOS shell
+# scripts (.command), the CI workflow, and Python all check out with Unix line
+# endings regardless of the contributor's platform or git autocrlf setting.
+* text=auto eol=lf
+
+# Windows batch files must keep CRLF.
+*.bat text eol=crlf
+
+# Binary assets — never touch.
+*.xlsx binary
+*.icns binary
+*.png binary
+*.ico binary
+*.mp4 binary
