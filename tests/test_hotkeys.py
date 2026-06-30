@@ -116,7 +116,29 @@ def main():
         f"↓ did not re-mark Out during edit (out={win.out_point})"
     print(f"OK: editing a clip focuses the video and ↓ re-marks Out (out={win.out_point:.1f})")
 
-    print("HOTKEYS OK: ↑/↓ mark In/Out; edit focuses the video; I/O fire over lists and type in fields")
+    # 6) Holding → accelerates: a fresh tap is the small step, each auto-repeat
+    # while held moves a bit further.
+    win.editing_row = None
+    win.player.seek(0.0); app.processEvents()
+
+    def arrow_right(autorep):
+        app.sendEvent(win, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Right,
+                                     Qt.KeyboardModifier.NoModifier, "", autorep))
+        app.processEvents()
+
+    arrow_right(False)                      # fresh tap (resets the ramp)
+    prev = win.player.position()
+    deltas = []
+    for _ in range(5):
+        arrow_right(True)                   # held -> auto-repeats accelerate
+        cur = win.player.position()
+        deltas.append(round(cur - prev, 3)); prev = cur
+    assert win._arrow_held == 5, win._arrow_held
+    assert all(b >= a for a, b in zip(deltas, deltas[1:])), f"steps didn't grow: {deltas}"
+    assert deltas[-1] > deltas[0], f"no acceleration: {deltas}"
+    print(f"OK: holding → accelerates (step deltas = {deltas})")
+
+    print("HOTKEYS OK: ↑/↓ mark; edit focuses video; hold ←/→ accelerates; I/O work over lists")
     win.close()
     sys.stdout.flush()
     os._exit(0)

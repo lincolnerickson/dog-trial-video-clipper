@@ -82,10 +82,11 @@ Launch it:
 3. Type the **Search / event label** once (e.g. `NW3_Interior`). It's appended
    to every exported filename as `Participant - Search`.
 4. For each run:
-   - Scrub to the start → press **I** (set In).
-   - **Click the participant** in the roster to assign it to the *Participant*
-     field.
-   - Scrub to the end → press **O** (set Out).
+   - Scrub to the start → press **↑** (set In). *(Tap `←`/`→` to nudge; **hold**
+     them to scrub faster — the longer you hold, the faster it goes.)*
+   - Assign the participant: **press Enter** to drop the next name from the roster
+     on (top of the Participants list), or **click** their name in the list.
+   - Scrub to the end → press **↓** (set Out).
    - The clip is **added automatically** and that participant **leaves the
      roster** — so you always know who's left to film.
 5. Reorder, edit, or delete rows any time before export.
@@ -228,13 +229,13 @@ file's last few seconds before the join. Untick it for cameras that don't do thi
 | Key | Action |
 |-----|--------|
 | `Space` | Play / pause |
-| `←` / `→` | Step 1 second back / forward |
-| `Shift+←` / `Shift+→` | Step 10 seconds |
+| `←` / `→` | Scrub back / forward — tap to nudge, **hold to accelerate** |
+| `Shift+←` / `Shift+→` | Jump 10 seconds (fixed) |
 | `,` / `.` | Step one frame back / forward |
 | `Home` / `End` | Jump to start / end |
 | `J` / `K` / `L` | Slower / pause / faster (fast-scrub: tap L to ramp 1×→2×→4×→8×) |
 | `↑` / `↓` | Set In / Out at the playhead (`I` / `O` also work) |
-| `Enter` | Add the clip — or, in running-order mode, drop the next participant on (then it auto-adds) |
+| `Enter` | Add the clip — or, with a roster loaded, drop the next participant on (top of the list; then it auto-adds) |
 
 The clip auto-adds the moment In, a participant, and Out are all set (in any
 order). Typing in a field is normal text — the single-key hotkeys only fire when

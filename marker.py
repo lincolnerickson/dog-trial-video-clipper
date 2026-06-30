@@ -80,8 +80,10 @@ IMAGE_FILTER = (
 )
 SPEEDS = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 8.0]
 SHUTTLE = [1.0, 2.0, 4.0, 8.0]
-ARROW_STEP = 0.75        # seconds the ← / → arrows move per press (held = OS auto-repeat)
-ARROW_STEP_SHIFT = 10.0  # seconds per press when Shift is held
+ARROW_STEP = 0.75        # seconds a single ← / → tap moves the playhead
+ARROW_STEP_SHIFT = 10.0  # seconds per press when Shift is held (fixed jump, no ramp)
+ARROW_STEP_ACCEL = 0.3   # extra seconds added per held-key repeat — hold to scrub faster
+ARROW_STEP_MAX = 12.0    # cap on the per-press step while a ← / → is held down
 PARTICIPANT_PLACEHOLDER = "click a participant (or type a name) — clip auto-adds on Out"
 # Header-ish first lines tolerated (and skipped) when loading a running-order file.
 RUN_ORDER_HEADERS = {"participant", "participants", "name", "running order", "handler dog"}
@@ -216,6 +218,7 @@ class MarkerWindow(QMainWindow):
         self.out_point: float | None = None
         self.editing_row: int | None = None
         self._scrubbing = False
+        self._arrow_held = 0     # consecutive ←/→ auto-repeats, for hold-to-accelerate
         self._ffmpeg: str | None = None
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
@@ -876,35 +879,37 @@ class MarkerWindow(QMainWindow):
         self._available.sort(key=lambda n: rank.get(n, len(rank)))
 
     def _next_participant(self) -> str | None:
-        """The next participant to add in running-order mode (top of the list)."""
-        if self._run_order and self._available:
-            return self._available[0]
-        return None
+        """The next participant Enter will add: the top of the available roster
+        (in running order when one is loaded, otherwise CSV/load order)."""
+        return self._available[0] if self._available else None
 
     def _update_next_up(self):
         """Surface who's next: in the field placeholder and the roster hint."""
         nxt = self._next_participant()
         if nxt:
-            self.label_edit.setPlaceholderText(f"press Enter → {nxt}   (next in running order)")
+            where = "next in running order" if self._run_order else "next participant"
+            self.label_edit.setPlaceholderText(f"press Enter → {nxt}   ({where})")
+            prefix = "Running order on · " if self._run_order else ""
             self.roster_hint.setText(
-                f"Running order on · next up: {nxt} · press Enter to add it (or click any name)."
+                f"{prefix}Next up: {nxt} · press Enter to add it (or click any name)."
             )
         else:
             self.label_edit.setPlaceholderText(PARTICIPANT_PLACEHOLDER)
             self.roster_hint.setText("Click a name to add it to the current clip.")
 
     def _pick_next_participant(self):
-        """Assign the next participant in running order (same as clicking it)."""
+        """Assign the next participant — the top of the roster — same as clicking it."""
         nxt = self._next_participant()
         if nxt is None:
-            self.statusBar().showMessage("No participants left in the running order.", 3000)
+            self.statusBar().showMessage("No participants left in the roster.", 3000)
             return
         self._pick_participant(nxt)
 
     def _on_enter(self):
-        """Enter: in running-order mode with no name yet, grab the next
-        participant (which auto-adds once In/Out are set); otherwise add/update."""
-        if (self.editing_row is None and self._run_order and self._available
+        """Enter: with a roster loaded and no name typed yet, grab the next
+        participant (top of the list) so it auto-adds once In/Out are set. Works
+        whether or not a running order is loaded. Otherwise add/update the clip."""
+        if (self.editing_row is None and self._available
                 and not self.label_edit.text().strip()):
             self._pick_next_participant()
             return
@@ -1445,10 +1450,20 @@ class MarkerWindow(QMainWindow):
 
         if key == Qt.Key.Key_Space:
             self.player.toggle_play()
-        elif key == Qt.Key.Key_Left:
-            self.player.step_seconds(-ARROW_STEP_SHIFT if shift else -ARROW_STEP)
-        elif key == Qt.Key.Key_Right:
-            self.player.step_seconds(ARROW_STEP_SHIFT if shift else ARROW_STEP)
+        elif key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            direction = -1.0 if key == Qt.Key.Key_Left else 1.0
+            # Hold to scrub faster: each auto-repeat while the key is held grows
+            # the step, so a tap nudges and a hold accelerates. A fresh press
+            # (not an auto-repeat) resets to the small tap step. Shift = fixed 10s.
+            if event.isAutoRepeat():
+                self._arrow_held += 1
+            else:
+                self._arrow_held = 0
+            if shift:
+                step = ARROW_STEP_SHIFT
+            else:
+                step = min(ARROW_STEP + self._arrow_held * ARROW_STEP_ACCEL, ARROW_STEP_MAX)
+            self.player.step_seconds(direction * step)
         elif key == Qt.Key.Key_Comma:
             self.player.step_frames(-1)
         elif key == Qt.Key.Key_Period:

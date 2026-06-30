@@ -77,7 +77,25 @@ def main():
     assert win._available == ["Sara Tracer", "Jess Bramble", "Mystery Dog"], win._available
     print("OK: an unknown name sorts after the running-order names")
 
-    print("RUN ORDER OK: extract from view 1, sort view 2, Enter adds next in order")
+    # --- Enter also adds the next roster participant with NO running order set
+    # (view 1, straight from the loaded CSV in its own order). ---
+    win.clips = []
+    win._run_order = []
+    win._roster_all = ["Amy Ace", "Bob Bolt", "Cy Comet"]
+    win._available = list(win._roster_all)
+    win._refresh_roster()
+    assert win._next_participant() == "Amy Ace", win._next_participant()
+    plain = []
+    for _ in range(3):
+        win.in_point, win.out_point = 1.0, 2.0
+        win.label_edit.clear()
+        win._on_enter()
+        app.processEvents()
+        plain.append(win.clips[-1].label)
+    assert plain == ["Amy Ace", "Bob Bolt", "Cy Comet"], f"Enter w/o running order: {plain}"
+    print(f"OK: Enter adds next roster participant with no running order = {plain}")
+
+    print("RUN ORDER OK: Enter adds next (with or without a running order); view 2 sorts to view 1")
     win.close()
     sys.stdout.flush()
     os._exit(0)
