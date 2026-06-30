@@ -51,7 +51,7 @@ def main():
     win._available = list(names)
     win._refresh_roster()
     win.search_edit.setText("NW3_Interior")
-    assert names[0] == "Smith Rex", names
+    assert names[0] == "Smith & Rex", names
     print("roster:", names)
 
     def mark(start, end, participant):
@@ -62,52 +62,49 @@ def main():
         win.out_point = end
         win._maybe_autocommit()                    # "O" -> auto-add
 
-    mark(5.0, 15.0, "Smith Rex")
-    mark(18.5, 30.0, "Jones Bella")
+    mark(5.0, 15.0, "Smith & Rex")
+    mark(18.5, 30.0, "Jones & Bella")
     assert len(win.clips) == 2, win.clips
-    assert win.clips[0].source_participant == "Smith Rex"
-    assert "Smith Rex" not in win._available and "Jones Bella" not in win._available
-    assert win._available == ["O'Brien Max", "Nguyen Scout"], win._available
+    assert win.clips[0].source_participant == "Smith & Rex"
+    assert "Smith & Rex" not in win._available and "Jones & Bella" not in win._available
+    assert win._available == ["O'Brien & Max", "Nguyen & Scout"], win._available
     print("after 2 auto-adds, roster left:", win._available)
 
     # Delete clip 0 -> its participant returns to the roster, in original order.
     win.table.selectRow(0)
     win.delete_selected()
     assert len(win.clips) == 1
-    assert win._available[0] == "Smith Rex", win._available
+    assert win._available[0] == "Smith & Rex", win._available
     print("after delete, roster left:", win._available)
 
-    # Export label/filename reads as "Participant - Search" (no number prefix).
+    # The clip's label still carries "Participant - Search" internally.
     eff = win._effective_clips()
-    assert eff[0].label == "Jones Bella - NW3_Interior", eff[0].label
-    fname = naming.build_filename(eff[0].label)
-    assert fname == "Jones Bella - NW3_Interior.mp4", fname
-    print("export filename:", fname)
+    assert eff[0].label == "Jones & Bella - NW3_Interior", eff[0].label
 
-    # CSV export round-trips the combined label.
+    # CSV export round-trips that combined label (so the CLI cutter can fold too).
     tmp_csv = root / "tests" / "_tmp_marker.csv"
     clips_mod.write_csv(tmp_csv, eff)
-    assert clips_mod.read_csv(tmp_csv)[0].label == "Jones Bella - NW3_Interior"
+    assert clips_mod.read_csv(tmp_csv)[0].label == "Jones & Bella - NW3_Interior"
     tmp_csv.unlink()
 
-    # Real cut to disk -> confirm the actual file lands with the readable name.
+    # Flat export keeps the participant in the filename (so names stay unique).
     out_dir = root / "tests" / "_tmp_out"
     result = cutter.run_batch(find_ffmpeg(), video, eff, out_dir)
     produced = sorted(p.name for p in out_dir.glob("*.mp4"))
-    assert produced == ["Jones Bella - NW3_Interior.mp4"], produced
+    assert produced == ["Jones & Bella - NW3_Interior.mp4"], produced
     for p in out_dir.glob("*.mp4"):
         p.unlink()
     out_dir.rmdir()
-    print("cut to disk:", produced, f"({result.elapsed:.2f}s)")
+    print("flat export:", produced, f"({result.elapsed:.2f}s)")
 
-    # Folder-per-participant: the clip lands in a "Jones Bella/" subfolder.
+    # Folder-per-participant: folder = "Jones & Bella", file = just the search.
     grouped_dir = root / "tests" / "_tmp_grouped"
     cutter.run_batch(find_ffmpeg(), video, eff, grouped_dir, folder_per_participant=True)
     grouped = sorted(p.relative_to(grouped_dir).as_posix() for p in grouped_dir.rglob("*.mp4"))
-    assert grouped == ["Jones Bella/Jones Bella - NW3_Interior.mp4"], grouped
+    assert grouped == ["Jones & Bella/NW3_Interior.mp4"], grouped
     for p in grouped_dir.rglob("*.mp4"):
         p.unlink()
-    (grouped_dir / "Jones Bella").rmdir()
+    (grouped_dir / "Jones & Bella").rmdir()
     grouped_dir.rmdir()
     print("folder per participant:", grouped)
 

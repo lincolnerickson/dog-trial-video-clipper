@@ -1102,12 +1102,18 @@ class MarkerWindow(QMainWindow):
             return f"{part} - {search}"
         return part
 
+    def _output_preview(self, participant: str) -> str:
+        """Where a clip lands, as ``Folder/File.mp4``: the participant is the
+        folder, the search/event label is the file inside it."""
+        part = (participant or "").strip()
+        search = self.search_edit.text().strip()
+        folder = naming.sanitize_label(part) if part else ""
+        fname = naming.build_filename(search or part or "clip")
+        return f"{folder}/{fname}" if folder else fname
+
     def _update_preview(self):
-        text = self.label_edit.text()
-        if text.strip():
-            self.preview_label.setText("→ " + naming.build_filename(self._combined_label(text)))
-        else:
-            self.preview_label.setText("→ —")
+        text = self.label_edit.text().strip()
+        self.preview_label.setText("→ " + self._output_preview(text) if text else "→ —")
         self._update_next_up()
 
     @_undoable
@@ -1178,7 +1184,7 @@ class MarkerWindow(QMainWindow):
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 if length <= 0 or not clip.label.strip():
                     item.setForeground(Qt.GlobalColor.red)
-                item.setToolTip(naming.build_filename(self._combined_label(clip.label)))
+                item.setToolTip(self._output_preview(clip.label))
                 self.table.setItem(i, c, item)
         self.count_label.setText(f"{len(self.clips)} clip{'s' if len(self.clips) != 1 else ''}")
         self._update_preview()
@@ -1433,9 +1439,10 @@ class MarkerWindow(QMainWindow):
             return
         folder_per_participant = QMessageBox.question(
             self, "Output layout",
-            "Group the clips into a folder per participant (handler + dog)?\n\n"
-            "Yes = one folder each, e.g. “Sara Tracer/”, “Sara Otter/” (recommended)\n"
-            "No = all clips in one flat folder",
+            "Group the clips into a folder per participant?\n\n"
+            "Yes = one folder each (“Sara & Tracer/”), the file named for the search "
+            "label (“Interior Search 1.mp4”) — recommended\n"
+            "No = all clips in one flat folder (“Sara & Tracer - Interior Search 1.mp4”)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
         ) == QMessageBox.StandardButton.Yes

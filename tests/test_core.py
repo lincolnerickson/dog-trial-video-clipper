@@ -138,25 +138,30 @@ def test_roster_handler_dog(tmp=Path(__file__).resolve().parent / "_tmp_roster.c
     tmp.write_text("handler,dog\nSmith,Rex\nJones,Bella\nO'Brien,Max\n", encoding="utf-8")
     names = roster.load_participants(tmp)
     tmp.unlink()
-    assert names == ["Smith Rex", "Jones Bella", "O'Brien Max"], names
-    # and they sanitize to the expected filename stems
-    assert naming.sanitize_label(names[0]) == "Smith Rex"
-    assert naming.sanitize_label(names[2]) == "OBrien Max"
+    # handler + dog -> "First & Dog"
+    assert names == ["Smith & Rex", "Jones & Bella", "O'Brien & Max"], names
+    # and they sanitize to the expected filename stems (& is kept; apostrophe dropped)
+    assert naming.sanitize_label(names[0]) == "Smith & Rex"
+    assert naming.sanitize_label(names[2]) == "OBrien & Max"
+    # only the handler's FIRST name is used
+    tmp.write_text("handler,dog\nSara Johnson,Tracer\n", encoding="utf-8")
+    assert roster.load_participants(tmp) == ["Sara & Tracer"]
+    tmp.unlink()
 
 
 def test_roster_variants(tmp=Path(__file__).resolve().parent / "_tmp_roster2.csv"):
-    # no header, two columns -> joined in order
+    # no header, two columns -> joined in order (can't tell handler from dog)
     tmp.write_text("Smith,Rex\nJones,Bella\n", encoding="utf-8")
     assert roster.load_participants(tmp) == ["Smith Rex", "Jones Bella"]
     # single name column with header, plus an id column that's ignored
     tmp.write_text("bib,participant\n12,Smith / Rex\n7,Jones Bella\n", encoding="utf-8")
     assert roster.load_participants(tmp) == ["Smith / Rex", "Jones Bella"]
-    # 'participant' + 'dog' header -> joined (the user's real layout)
+    # 'participant' + 'dog' header -> "First & Dog" (the user's real layout)
     tmp.write_text("participant,dog\nSmith,Rex\nJones,Bella\n", encoding="utf-8")
-    assert roster.load_participants(tmp) == ["Smith Rex", "Jones Bella"]
+    assert roster.load_participants(tmp) == ["Smith & Rex", "Jones & Bella"]
     # 'participant' + 'dog' with an ignored id column
     tmp.write_text("bib,participant,dog\n3,Smith,Rex\n", encoding="utf-8")
-    assert roster.load_participants(tmp) == ["Smith Rex"]
+    assert roster.load_participants(tmp) == ["Smith & Rex"]
     tmp.unlink()
 
 

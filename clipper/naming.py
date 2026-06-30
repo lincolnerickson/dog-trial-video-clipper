@@ -23,7 +23,7 @@ _ILLEGAL = r'<>:"/\\|?*'
 _ILLEGAL_RE = re.compile(f"[{re.escape(_ILLEGAL)}]")
 _APOSTROPHES = "'‘’ʼ´`"  # straight + curly + accents
 _WHITESPACE_RE = re.compile(r"\s+")
-_KEEP_RE = re.compile(r"[^A-Za-z0-9 ._-]")  # note: space is kept
+_KEEP_RE = re.compile(r"[^A-Za-z0-9 ._&-]")  # note: space and & are kept ("Sara & Tracer")
 
 # Reserved device names on Windows (case-insensitive, with or without ext).
 _RESERVED = {

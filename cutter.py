@@ -69,17 +69,29 @@ class BatchResult:
 
 
 def group_folder(clip: clips_mod.Clip) -> str:
-    """The handler+dog folder a clip belongs in (e.g. ``Sara Tracer``).
+    """The participant folder a clip belongs in (e.g. ``Sara & Tracer``).
 
     Prefers the participant the marker captured when the clip was marked; if that
     isn't set (the CLI path, reading only a CSV) it falls back to the part of the
     label before the ``" - "`` search separator -- which the marker guarantees is
-    exactly the ``Handler Dog`` pair.
+    exactly the ``First & Dog`` participant.
     """
     participant = (clip.source_participant or "").strip()
     if not participant:
         participant = clip.label.split(" - ", 1)[0].strip()
     return participant or clip.label
+
+
+def folder_filename_label(clip: clips_mod.Clip) -> str:
+    """The label a clip's file gets *inside its participant folder*: the
+    search/event part only, since the participant is the folder itself
+    (``Sara & Tracer - Interior Search 1`` -> ``Interior Search 1``). Falls back
+    to the whole label if there's no search part to split off.
+    """
+    label = (clip.label or "").strip()
+    if " - " in label:
+        return label.split(" - ", 1)[1].strip() or label
+    return label
 
 
 def out_path_for(out_dir: Path, filename: str, clip: clips_mod.Clip, folder_per_participant: bool) -> Path:
@@ -179,7 +191,10 @@ def run_batch(
             break
         rownum = idx + 1
         label_display = clip.label.strip() or "(blank)"
-        filename = naming.build_filename(clip.label, ext=ext)
+        # In a participant folder the file is just the search part (the folder is
+        # the participant); a flat export keeps the participant in the filename.
+        file_label = folder_filename_label(clip) if folder_per_participant else clip.label
+        filename = naming.build_filename(file_label, ext=ext)
 
         if idx in errors_by_row:
             outcome = RowOutcome(
@@ -252,8 +267,9 @@ def parse_args(argv=None) -> argparse.Namespace:
         "--folder-per-label",   # back-compat alias
         dest="folder_per_participant",
         action="store_true",
-        help="group clips into a subfolder per participant (handler + dog), "
-        "e.g. 'Sara Tracer/' (default: one flat folder)",
+        help="group clips into a subfolder per participant ('First & Dog', "
+        "e.g. 'Sara & Tracer/'), the file named for just the search part "
+        "(default: one flat folder)",
     )
     p.add_argument("--ext", default="mp4", help="output container/extension (default: mp4)")
     p.add_argument("--ffmpeg", default=None, help="path to ffmpeg (default: auto-detect)")

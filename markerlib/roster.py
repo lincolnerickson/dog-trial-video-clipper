@@ -1,9 +1,11 @@
 """Load a participant roster from a CSV into a list of display labels.
 
 The videographer's roster typically has separate **handler** and **dog**
-columns; those are joined per row (handler first) into one participant label
-like "Smith Rex" (which sanitizes to ``Smith_Rex`` on export). The parser is
-forgiving:
+columns; those are joined per row into one participant label as
+``First & Dog`` -- the handler's **first name** and the dog name (e.g. handler
+"Sara Johnson", dog "Tracer" -> ``Sara & Tracer``). That participant becomes the
+output **folder** per run, with the search/event label as the filename inside it.
+The parser is forgiving:
 
   * with a header, it prefers handler/dog columns, else a single name column,
     else joins all non-id columns;
@@ -41,6 +43,16 @@ def _find(cols: list[str], keys: tuple[str, ...]) -> int | None:
     return None
 
 
+def _handler_dog_label(handler: str, dog: str) -> str:
+    """``First & Dog`` from a handler + dog pair: the handler's first name (first
+    word) and the dog name. Falls back gracefully if either is missing."""
+    handler, dog = handler.strip(), dog.strip()
+    first = handler.split()[0] if handler.split() else ""
+    if first and dog:
+        return f"{first} & {dog}"
+    return first or dog
+
+
 def load_participants(path: str | Path) -> list[str]:
     with open(path, "r", encoding="utf-8-sig", newline="") as fh:
         rows = [r for r in csv.reader(fh)]
@@ -49,6 +61,8 @@ def load_participants(path: str | Path) -> list[str]:
         return []
 
     use_cols: list[int] | None = None
+    person_col: int | None = None   # set (with dog_col) when we have a handler+dog pair
+    dog_col: int | None = None
     data = rows
     if _looks_like_header(rows[0]):
         header = [c.strip().lower() for c in rows[0]]
@@ -65,7 +79,11 @@ def load_participants(path: str | Path) -> list[str]:
                     (i for i in range(len(header)) if i != di and header[i] not in _ID_KEYS),
                     None,
                 )
-            use_cols = [partner, di] if (partner is not None and partner != di) else [di]
+            if partner is not None and partner != di:
+                person_col, dog_col = partner, di     # -> "First & Dog"
+                use_cols = [partner, di]
+            else:
+                use_cols = [di]
         elif ni is not None:
             use_cols = [ni]
         else:
@@ -74,11 +92,14 @@ def load_participants(path: str | Path) -> list[str]:
 
     labels: list[str] = []
     for row in data:
-        if use_cols is not None:
-            parts = [row[c] for c in use_cols if c < len(row)]
+        if person_col is not None and dog_col is not None:
+            handler = row[person_col] if person_col < len(row) else ""
+            dog = row[dog_col] if dog_col < len(row) else ""
+            label = _handler_dog_label(handler, dog)
+        elif use_cols is not None:
+            label = " ".join(row[c].strip() for c in use_cols if c < len(row) and row[c].strip())
         else:
-            parts = list(row)
-        label = " ".join(p.strip() for p in parts if p.strip())
+            label = " ".join(p.strip() for p in row if p.strip())
         if label:
             labels.append(label)
     return labels

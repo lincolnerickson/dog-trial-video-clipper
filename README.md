@@ -117,35 +117,38 @@ So the running order can be saved from the first view and reused:
    into running order**, so the **top name is always the next run**.
 4. Now marking is pure keyboard: **↑** (In) → **↓** (Out) → **Enter** drops the
    top name onto the clip, it auto-adds, and the next name rises to the top. The
-   Participant field shows who's next (`press Enter → Sara Tracer`).
+   Participant field shows who's next (`press Enter → Sara & Tracer`).
 
 If a run happens out of order (a dog scratches, or runs early), just **click the
 correct name** instead of pressing Enter — that always wins, and the order picks
 up from there. Names in the file that aren't in the roster are ignored; roster
 names not in the file simply sort to the bottom.
 
-### Output folders (one per handler + dog)
+### Output folders (one per participant) & filenames
 
 When you **Export clips…**, choose **Yes** to "group into a folder per
-participant" and each clip lands in a folder named for its handler + dog:
+participant" and each clip lands in a folder named **`First & Dog`** (the
+handler's first name and the dog), with the file named for the **search/event
+label** — because the folder already says who it is:
 
 ```
-Sara Tracer/
-   Sara Tracer - NW3 Interior.mp4
-   Sara Tracer - NW2 Exterior.mp4
-Sara Otter/
-   Sara Otter - NW3 Interior.mp4
+Sara & Tracer/
+   Interior Search 1.mp4
+   Exterior Search.mp4
+Sara & Otter/
+   Interior Search 1.mp4
 ```
 
-- The pair (e.g. `Sara Tracer`) is the folder; the same handler with a different
-  dog (`Sara Otter`) gets its own folder.
+- The participant (e.g. `Sara & Tracer`) is the folder; the same handler with a
+  different dog (`Sara & Otter`) gets its own folder. The **filename is the
+  search/event label** you typed (`Interior Search 1.mp4`).
 - Exporting a **later** video's clips into the **same** output folder **reuses**
-  those folders — clips accumulate, no `Sara Tracer (2)/` duplicates.
+  those folders — clips accumulate, no `Sara & Tracer (2)/` duplicates.
 - A new clip **never overwrites** an existing file: if a file of the same name is
-  already there (same pair + same search label), the new one becomes
+  already there (same participant + same search label), the new one becomes
   `… (2).mp4`, so nothing is lost.
-- Choose **No** for a single flat folder instead (the names still read
-  `Handler Dog - Search.mp4`, so they group easily later).
+- Choose **No** for a single flat folder instead — there the filename keeps the
+  participant, `First & Dog - Search.mp4`, so the files stay unique and grouped.
 
 ### Intro & outro cards on every clip
 
@@ -287,7 +290,7 @@ Options:
 | `--video, -i` | (required) | source video file |
 | `--csv, -c` | `clips.csv` | clip-list CSV |
 | `--out, -o` | `clips` | output folder |
-| `--folder-per-participant` | off | group clips into a subfolder per participant — handler + dog, e.g. `Sara Tracer/` (alias: `--folder-per-label`; default: one flat folder) |
+| `--folder-per-participant` | off | group clips into a subfolder per participant (`First & Dog`, e.g. `Sara & Tracer/`), with the file named for just the search part (alias: `--folder-per-label`; default: one flat folder) |
 | `--ext` | `mp4` | output container/extension |
 | `--ffmpeg` | auto | explicit ffmpeg path |
 | `--web-safe` | off | write browser-playable H.264 (yuv420p, fast-start): H.265 re-encoded, H.264 stream-copied; auto-uses the fastest H.264 encoder (GPU if any) |
@@ -319,17 +322,18 @@ Jones,Bella
 O'Brien,Max
 ```
 
-Loaded via **Load roster…**. Handler + dog columns are joined per row
-(`Smith Rex`). A single `name`/`participant` column also works, with or without
-a header; id-like columns (`bib`, `number`, …) are ignored. See
-`sample/roster.csv`.
+Loaded via **Load roster…**. Handler + dog columns are joined per row into
+**`First & Dog`** — the handler's first name and the dog (`Smith,Rex` →
+`Smith & Rex`; `Sara Johnson,Tracer` → `Sara & Tracer`). A single
+`name`/`participant` column also works, with or without a header; id-like
+columns (`bib`, `number`, …) are ignored. See `sample/roster.csv`.
 
 ### Clip list (marker ⇄ cutter)
 
 ```csv
 start,end,label
-00:14:32.000,00:17:05.000,Smith Rex - NW3 Interior
-00:19:48.000,00:22:30.000,Jones Bella - NW3 Interior
+00:14:32.000,00:17:05.000,Smith & Rex - NW3 Interior
+00:19:48.000,00:22:30.000,Jones & Bella - NW3 Interior
 00:25:10.000,00:25:40.000,Photo finish - NW3 Interior,1
 ```
 
@@ -341,9 +345,11 @@ start,end,label
   one row frame-accurately by re-encoding instead of stream-copying. The marker
   writes this column only when at least one clip uses it.
 
-Output filenames are the readable `<label>.<ext>`, e.g.
-`Smith Rex - NW3 Interior.mp4` — spaces and capitalization preserved. If two
-clips would collide, the later one gets a ` (2)` suffix so nothing is lost.
+Output filenames are readable, spaces and capitalization preserved. In a flat
+export the file is the whole `<label>.<ext>` (`Smith & Rex - NW3 Interior.mp4`);
+with **folder-per-participant** the participant becomes the folder and the file
+is just the search part (`Smith & Rex/NW3 Interior.mp4`). If two clips would
+collide, the later one gets a ` (2)` suffix so nothing is lost.
 
 ---
 
