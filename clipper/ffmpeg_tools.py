@@ -88,15 +88,22 @@ def build_cut_command(
     crf: int = 23,
     preset: str = "medium",
     web_safe: bool = False,
+    video_mode: str = "copy",
     src_info: "StreamInfo | None" = None,
 ) -> list[str]:
     """Assemble the ffmpeg argument list for one cut (no I/O).
 
-    ``web_safe`` forces a browser-playable H.264 mp4 (yuv420p, ``+faststart``):
-    a source that is already web-safe H.264 is stream-copied; anything else
-    (e.g. H.265) is re-encoded with ``encoder`` -- which should be an H.264
-    encoder, GPU if available (see :func:`find_h264_encoder`). ``src_info`` lets
-    the caller skip the re-encode when a copy will do.
+    ``video_mode`` selects the output video:
+      * ``"copy"``  -- stream copy (original codec, lossless, fastest). An
+        ``exact`` row still re-encodes with ``encoder`` for a frame-accurate start.
+      * ``"hevc"``  -- re-encode to HEVC at ``crf`` (smaller delivery file, keeps
+        full detail; ``encoder`` should be an HEVC encoder, GPU if available --
+        see :func:`find_hevc_encoder`).
+      * ``"h264"``  -- browser-playable H.264 (``+faststart``); a source already
+        web-safe H.264 is stream-copied, anything else re-encoded with ``encoder``.
+
+    ``web_safe=True`` is the legacy spelling of ``video_mode="h264"``. ``src_info``
+    lets the caller skip a re-encode when a copy will do / pick audio handling.
     """
     duration = max(end - start, 0.0)
     start_tc = timecode.format_timecode(start)
@@ -114,7 +121,18 @@ def build_cut_command(
         "-map", "0:a?",       # include audio if present, don't fail if absent
     ]
 
-    if web_safe:
+    mode = video_mode if video_mode in ("hevc", "h264") else ("h264" if web_safe else "copy")
+
+    if mode == "hevc":
+        # Re-encode to HEVC at a constant-quality target. Keep the source's own
+        # audio when it's already AAC (lossless, instant); hvc1 tag for Apple/NLE.
+        audio = "copy" if (src_info and src_info.has_audio and src_info.acodec == "aac") else "aac"
+        cmd += (
+            ["-c:v", encoder]
+            + h264_quality_args(encoder, crf, preset)
+            + ["-tag:v", "hvc1", "-c:a", audio, "-movflags", "+faststart"]
+        )
+    elif mode == "h264":
         # Copy the video only if it is already a browser-safe H.264; otherwise
         # re-encode to H.264. `exact` forces a re-encode (frame-accurate start).
         if src_info is not None and _h264_safe_source(src_info) and not exact:
@@ -156,6 +174,7 @@ def run_cut(
     crf: int = 23,
     preset: str = "medium",
     web_safe: bool = False,
+    video_mode: str = "copy",
     src_info: "StreamInfo | None" = None,
     dry_run: bool = False,
 ) -> CutResult:
@@ -164,7 +183,7 @@ def run_cut(
     cmd = build_cut_command(
         ffmpeg, src, start, end, out_path,
         exact=exact, encoder=encoder, crf=crf, preset=preset,
-        web_safe=web_safe, src_info=src_info,
+        web_safe=web_safe, video_mode=video_mode, src_info=src_info,
     )
     if dry_run:
         return CutResult(ok=True, output=out_path, command=cmd)
@@ -323,12 +342,22 @@ _H264_ENCODER_CANDIDATES = (
 )
 
 
-def find_h264_encoder(ffmpeg: str, candidates: Sequence[str] = _H264_ENCODER_CANDIDATES) -> str:
-    """Pick the fastest H.264 encoder that actually works on this machine.
+# Same idea for HEVC/H.265 (the smaller-file delivery re-encode): hardware first,
+# libx265 as the always-present software fallback.
+_HEVC_ENCODER_CANDIDATES = (
+    "hevc_nvenc",         # NVIDIA
+    "hevc_qsv",           # Intel Quick Sync
+    "hevc_amf",           # AMD
+    "hevc_videotoolbox",  # Apple (fast on Apple Silicon)
+    "libx265",            # software (always works)
+)
 
-    "Compiled in" (ffmpeg -encoders) is not enough -- a GPU encoder fails at
-    runtime without the hardware. So each candidate is proven with a one-frame
-    test encode; ``libx264`` is the guaranteed software fallback.
+
+def _first_working_encoder(ffmpeg: str, candidates: Sequence[str], fallback: str) -> str:
+    """First candidate that survives a one-frame test encode, else ``fallback``.
+
+    "Compiled in" (ffmpeg -encoders) isn't enough -- a GPU encoder fails at
+    runtime without the hardware -- so each candidate is proven for real.
     """
     for enc in candidates:
         proc = subprocess.run(
@@ -339,14 +368,26 @@ def find_h264_encoder(ffmpeg: str, candidates: Sequence[str] = _H264_ENCODER_CAN
         )
         if proc.returncode == 0:
             return enc
-    return "libx264"
+    return fallback
+
+
+def find_h264_encoder(ffmpeg: str, candidates: Sequence[str] = _H264_ENCODER_CANDIDATES) -> str:
+    """Fastest working H.264 encoder on this machine (``libx264`` fallback)."""
+    return _first_working_encoder(ffmpeg, candidates, "libx264")
+
+
+def find_hevc_encoder(ffmpeg: str, candidates: Sequence[str] = _HEVC_ENCODER_CANDIDATES) -> str:
+    """Fastest working HEVC/H.265 encoder on this machine (``libx265`` fallback)."""
+    return _first_working_encoder(ffmpeg, candidates, "libx265")
 
 
 def h264_quality_args(encoder: str, crf: int, preset: str) -> list[str]:
-    """Quality/rate-control args for an H.264 encoder, keyed off its family.
+    """Constant-quality args for an H.264 *or* HEVC encoder, keyed off its family.
 
-    ``crf`` is interpreted as a constant-quality target on every encoder (CQ on
-    NVENC, QP on AMF, global_quality on QSV) so one number drives them all.
+    ``crf`` is interpreted as a constant-quality target on every encoder (CRF on
+    libx264/libx265, CQ on NVENC, QP on AMF, global_quality on QSV, q:v on
+    VideoToolbox) so one number drives them all -- works for both codecs because
+    the rate-control flags are the same for ``h264_*`` and ``hevc_*`` variants.
     """
     e = (encoder or "").lower()
     if "nvenc" in e:
@@ -557,6 +598,7 @@ def run_cut_with_cards(
     crf: int = 23,
     preset: str = "medium",
     web_safe: bool = False,
+    video_mode: str = "copy",
     src_info: StreamInfo | None = None,
     card_cache: dict[str, str] | None = None,
     dry_run: bool = False,
@@ -577,18 +619,23 @@ def run_cut_with_cards(
         return run_cut(
             ffmpeg, src, start, end, out_path,
             exact=exact, encoder=encoder, crf=crf, preset=preset,
-            web_safe=web_safe, src_info=src_info, dry_run=dry_run,
+            web_safe=web_safe, video_mode=video_mode, src_info=src_info, dry_run=dry_run,
         )
 
     info = src_info or probe_streams(ffmpeg, src)
+    mode = video_mode if video_mode in ("hevc", "h264") else ("h264" if web_safe else "copy")
     # Decide the body's codec and whether it must be re-encoded:
-    #   web-safe -> always H.264 (re-encode unless the source already qualifies);
-    #   exact    -> re-encode to the encoder's codec for a frame-accurate start;
-    #   else     -> stream-copy the source's own codec.
-    if web_safe:
+    #   h264 -> always H.264 (re-encode unless the source already qualifies);
+    #   hevc -> always re-encode to HEVC (software here, so cards/body match);
+    #   copy -> exact re-encodes to the encoder's codec, else stream-copy.
+    if mode == "h264":
         body_codec = "h264"
         body_encoder = encoder if encoder_codec_family(encoder) == "h264" else "libx264"
         body_reencode = exact or not _h264_safe_source(info)
+    elif mode == "hevc":
+        body_codec = "hevc"
+        body_encoder = "libx265"
+        body_reencode = True
     else:
         body_codec = encoder_codec_family(encoder) if exact else info.vcodec
         body_encoder = encoder

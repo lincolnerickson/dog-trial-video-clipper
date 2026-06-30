@@ -141,6 +141,7 @@ def run_batch(
     intro: CardSpec | None = None,
     outro: CardSpec | None = None,
     web_safe: bool = False,
+    video_mode: str = "copy",
     dry_run: bool = False,
     progress: ProgressFn | None = None,
     cancel: Callable[[], bool] | None = None,
@@ -166,22 +167,32 @@ def run_batch(
         if issue.is_error:
             errors_by_row.setdefault(issue.index, []).append(issue.message)
 
-    # Resolve the re-encode encoder. For web-safe output that means an H.264
-    # encoder -- honour an explicit H.264 choice, else auto-pick the fastest one
-    # that works here (GPU if available). `exact` rows keep using libx264.
+    # Resolve the output video mode + its re-encode encoder. "hevc" picks the
+    # fastest working HEVC encoder (GPU if available), "h264" an H.264 one; an
+    # explicit matching --encoder is honoured. "copy" only re-encodes `exact`
+    # rows (with libx264) for a frame-accurate start.
+    mode = video_mode if video_mode in ("hevc", "h264") else ("h264" if web_safe else "copy")
     exact_encoder = encoder or "libx264"
-    web_encoder = None
-    if web_safe:
-        web_encoder = (
+    reencode_encoder = None
+    if mode == "h264":
+        reencode_encoder = (
             encoder if (encoder and encoder_codec_family(encoder) == "h264")
             else find_h264_encoder(ffmpeg)
         )
+    elif mode == "hevc":
+        # Software libx265 for a *consistent* CRF across machines. Hardware HEVC
+        # encoders read the quality number very differently (e.g. NVENC CQ 22 ~ 3x
+        # the bitrate of libx265 CRF 22), so an explicit hardware --encoder is
+        # honoured but never auto-selected here.
+        reencode_encoder = (
+            encoder if (encoder and encoder_codec_family(encoder) == "hevc")
+            else "libx265"
+        )
 
-    # The cards / web-safe re-encode all match the (single) source, so probe it
-    # once and reuse each encoded card across every row (cached .ts files cleaned
-    # up after the loop).
+    # The cards / re-encode all match the (single) source, so probe it once and
+    # reuse each encoded card across every row (cached .ts files cleaned up after).
     has_cards = intro is not None or outro is not None
-    src_info = probe_streams(ffmpeg, video) if (has_cards or web_safe) else None
+    src_info = probe_streams(ffmpeg, video) if (has_cards or mode != "copy") else None
     card_cache: dict[str, str] = {}
 
     used_dests: set[str] = set()
@@ -210,20 +221,20 @@ def run_batch(
         dest = unique_dest(out_path_for(out_dir, filename, clip, folder_per_participant), used_dests)
         used_dests.add(str(dest).lower())
         filename = dest.name
-        cut_encoder = web_encoder if web_safe else exact_encoder
+        cut_encoder = reencode_encoder if mode != "copy" else exact_encoder
         if has_cards:
             cut = run_cut_with_cards(
                 ffmpeg, video, clip.start, clip.end, dest,
                 intro=intro, outro=outro,
                 exact=clip.exact, encoder=cut_encoder, crf=crf, preset=preset,
-                web_safe=web_safe, src_info=src_info, card_cache=card_cache,
+                video_mode=mode, src_info=src_info, card_cache=card_cache,
                 dry_run=dry_run,
             )
         else:
             cut = run_cut(
                 ffmpeg, video, clip.start, clip.end, dest,
                 exact=clip.exact, encoder=cut_encoder, crf=crf, preset=preset,
-                web_safe=web_safe, src_info=src_info, dry_run=dry_run,
+                video_mode=mode, src_info=src_info, dry_run=dry_run,
             )
         if cut.ok:
             outcome = RowOutcome(
@@ -284,11 +295,17 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--crf", type=int, default=23, help="quality for re-encoded rows, lower=bigger/better (default: 23)")
     p.add_argument("--preset", default="medium", help="encoder preset for re-encoded rows (default: medium)")
     p.add_argument(
+        "--video-mode",
+        choices=("copy", "hevc", "h264"),
+        default="copy",
+        help="output video: 'copy' = stream copy, original codec (default); "
+        "'hevc' = re-encode smaller HEVC at --crf (keeps full detail); "
+        "'h264' = browser-playable H.264. Uses the fastest working GPU encoder.",
+    )
+    p.add_argument(
         "--web-safe",
         action="store_true",
-        help="make every clip a browser-playable H.264 mp4 (yuv420p, faststart): "
-        "H.265 sources are re-encoded, H.264 sources are stream-copied. Uses the "
-        "fastest working H.264 encoder (GPU if available).",
+        help="alias for --video-mode h264 (browser-playable H.264 mp4).",
     )
     p.add_argument(
         "--intro-image",
@@ -388,12 +405,15 @@ def main(argv=None) -> int:
         print(f"intro  : {Path(args.intro_image).name} for {args.intro_seconds:g}s on every clip")
     if outro is not None:
         print(f"outro  : {Path(args.outro_image).name} for {args.outro_seconds:g}s on every clip")
-    if args.web_safe:
-        web_enc = (
-            args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "h264")
-            else find_h264_encoder(ffmpeg)
-        )
-        print(f"web    : web-safe H.264 (browser-playable; H.265 re-encoded via {web_enc})")
+    video_mode = "h264" if args.web_safe else args.video_mode
+    if video_mode == "hevc":
+        enc = (args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "hevc")
+               else "libx265")
+        print(f"video  : re-encode to HEVC at crf {args.crf} (via {enc})")
+    elif video_mode == "h264":
+        enc = (args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "h264")
+               else find_h264_encoder(ffmpeg))
+        print(f"video  : web-safe H.264 (browser-playable; H.265 re-encoded via {enc})")
     if args.dry_run:
         print("mode   : DRY RUN (no files written)")
     print("-" * 64)
@@ -415,7 +435,7 @@ def main(argv=None) -> int:
         folder_per_participant=args.folder_per_participant, ext=args.ext,
         encoder=args.encoder, crf=args.crf, preset=args.preset,
         intro=intro, outro=outro,
-        web_safe=args.web_safe, dry_run=args.dry_run, progress=on_progress,
+        video_mode=video_mode, dry_run=args.dry_run, progress=on_progress,
     )
 
     print("-" * 64)

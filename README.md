@@ -193,33 +193,32 @@ exported clip. **Clear** removes either.
 > want the markers over the live footage instead, that's a different (re-encode)
 > mode we can add.
 
-### Web-safe clips (play in any browser)
+### Export video format (size vs quality)
 
-> **Usually leave this OFF.** If you deliver the original file and a server/host
-> makes the web/streaming version (or your buyers play on modern devices), the
-> default **lossless stream copy** is best — original quality, smaller files, and
-> instant export. Re-encoding to H.264 is slower and can make files *larger* than
-> an efficient HEVC source. Tick Web-safe only when the exported clips themselves
-> must play in Chrome/Firefox.
+The **Export video** dropdown picks how each clip's video is written:
 
-Tick **Web-safe H.264** before exporting and every clip is written as a
-universally browser-playable H.264 file — so previews work in **Chrome, Firefox
-and Safari**, not just on Apple devices.
+- **Smaller — HEVC (recommended, default):** re-encode to H.265 at the chosen
+  quality. About **half the size** of the original while keeping full 1080p
+  detail (great for zooming in), and it plays natively on modern devices
+  (iPhones, Macs, Windows 11). The **Quality (CRF)** box sets it — lower is
+  bigger/better; **22** is the detail-first setting (≈3–4 Mbps for 1080p60), try
+  **24–25** for noticeably smaller files. Re-encoding takes longer than a copy.
+- **Original — no re-encode:** a **lossless stream copy** in the source's own
+  codec — largest files, but exports in **seconds**. Best when you want the exact
+  original, or a server/host re-encodes for you.
+- **Web-safe — H.264:** for clips that must play **directly in Chrome/Firefox**.
+  H.265 sources are re-encoded to H.264 (GPU if available), H.264 sources are
+  stream-copied; always **fast-start** so a browser previews instantly. (Not
+  needed if a server makes the streaming version, or buyers are on Apple/modern
+  devices.)
 
-- **H.265 / HEVC footage** (common from GoPro/phones) won't play in Chrome or
-  Firefox as-is. Web-safe **re-encodes it to H.264** at a delivery quality
-  (**CRF 23** by default — good quality, sensible size), using your **GPU if one
-  is available** (NVIDIA/Intel/AMD/Apple) so even 4K stays fast; otherwise it
-  falls back to the CPU (slower).
-- **H.264 footage** is already browser-friendly, so it's **stream-copied
-  unchanged** (no quality loss, instant).
-- Either way the file is **web-optimised (fast-start)**: the index sits at the
-  front so a browser starts playing immediately instead of downloading the whole
-  file first.
-
-Leave it unticked to keep the default behaviour (a lossless stream copy in the
-source's own codec — best quality and speed, ideal if you preview on Apple
-devices or a platform that transcodes for you).
+> **Why HEVC for "smaller"?** A re-encode can't add detail beyond the source, so
+> the only way to beat the original's size *without* throwing away detail is a
+> more efficient codec — and H.265 is ~2× more efficient than H.264. CRF (quality)
+> rather than a fixed bitrate means busy/zoom-worthy moments automatically keep
+> more bitrate than calm ones. (The "Smaller" re-encode uses **libx265** for a
+> consistent CRF across machines — hardware HEVC encoders read the quality number
+> very differently.)
 
 ### Joining GoPro / DJI chapters into one file
 
@@ -318,8 +317,9 @@ Options:
 | `--folder-per-participant` | off | group clips into a subfolder per participant (`First & Dog`, e.g. `Sara & Tracer/`), with the file named for just the search part (alias: `--folder-per-label`; default: one flat folder) |
 | `--ext` | `mp4` | output container/extension |
 | `--ffmpeg` | auto | explicit ffmpeg path |
-| `--web-safe` | off | write browser-playable H.264 (yuv420p, fast-start): H.265 re-encoded, H.264 stream-copied; auto-uses the fastest H.264 encoder (GPU if any) |
-| `--encoder` | auto | encoder for re-encoded rows — `exact` rows and `--web-safe` (e.g. `h264_nvenc`); default `libx264`, or auto-detected for `--web-safe` |
+| `--video-mode` | `copy` | `copy` = stream copy (original codec); `hevc` = re-encode smaller HEVC at `--crf` (libx265, ~half size, full detail); `h264` = browser-playable H.264 (GPU if any, fast-start) |
+| `--web-safe` | off | alias for `--video-mode h264` |
+| `--encoder` | auto | encoder for re-encoded rows — `exact` rows, and an explicit GPU encoder for `--video-mode hevc/h264` (e.g. `hevc_nvenc`); default `libx264`/`libx265`, H.264 auto-detected for `h264` |
 | `--crf` / `--preset` | `23` / `medium` | quality/speed for re-encoded rows (lower CRF = bigger/better) |
 | `--intro-image` | none | image to prepend as an intro card to every clip (H.264/H.265 sources; body still stream-copied) |
 | `--intro-seconds` | `3` | how long the intro card is shown |

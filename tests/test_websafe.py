@@ -110,10 +110,28 @@ def main():
         "an H.264 source should be stream-copied, not re-encoded"
     print("H.264 source -> stream-copied, fast-start (no needless re-encode)")
 
-    for p in (hevc_src, out_hevc, out_h264):
+    # Smaller (HEVC) delivery re-encode: the source becomes HEVC at the chosen
+    # CRF, fast-start, decodes clean, and is clearly smaller than a stream copy.
+    out_copy = tmp / "copy.mp4"
+    assert run_cut(ff, sample, 5.0, 8.0, out_copy, video_mode="copy").ok
+    out_smaller = tmp / "smaller_hevc.mp4"
+    res3 = run_cut(ff, sample, 5.0, 8.0, out_smaller,
+                   video_mode="hevc", crf=28, preset="ultrafast",
+                   encoder="libx265", src_info=src_info)
+    assert res3.ok, f"hevc re-encode failed: {res3.stderr}"
+    info3 = probe_streams(ff, out_smaller)
+    assert info3.vcodec == "hevc", f"expected HEVC, got {info3.vcodec}"
+    assert _is_faststart(out_smaller), "hevc output is not fast-start"
+    clean3, errs3 = _decode_is_clean(ff, out_smaller)
+    assert clean3, f"hevc output did not decode cleanly:\n{errs3}"
+    assert out_smaller.stat().st_size < out_copy.stat().st_size, \
+        "HEVC re-encode should be smaller than a stream copy"
+    print("source -> smaller HEVC, fast-start, clean decode")
+
+    for p in (hevc_src, out_hevc, out_h264, out_copy, out_smaller):
         p.unlink()
     tmp.rmdir()
-    print("WEB-SAFE OK: clips are browser-playable H.264 with fast-start")
+    print("WEB-SAFE OK: H.264 web-safe + smaller-HEVC re-encode both clean & fast-start")
     return 0
 
 

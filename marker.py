@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -167,7 +168,7 @@ class ExportWorker(QThread):
     finishedResult = Signal(object)      # BatchResult
 
     def __init__(self, ffmpeg, video, rows, out_dir, folder_per_participant,
-                 intro=None, outro=None, web_safe=False):
+                 intro=None, outro=None, video_mode="copy", crf=22):
         super().__init__()
         self.ffmpeg = ffmpeg
         self.video = video
@@ -176,7 +177,8 @@ class ExportWorker(QThread):
         self.folder_per_participant = folder_per_participant
         self.intro = intro
         self.outro = outro
-        self.web_safe = web_safe
+        self.video_mode = video_mode
+        self.crf = crf
 
     def run(self):
         result = cutter.run_batch(
@@ -184,7 +186,8 @@ class ExportWorker(QThread):
             folder_per_participant=self.folder_per_participant,
             intro=self.intro,
             outro=self.outro,
-            web_safe=self.web_safe,
+            video_mode=self.video_mode,
+            crf=self.crf,
             progress=lambda rn, tot, o: self.rowDone.emit(rn, tot, o),
             cancel=self.isInterruptionRequested,
         )
@@ -448,19 +451,38 @@ class MarkerWindow(QMainWindow):
 
         # Web-safe delivery: re-encode to universal H.264 so clips play in any
         # browser (HEVC footage otherwise won't play in Chrome/Firefox).
-        self.web_safe_check = QCheckBox("Web-safe H.264 — for browser playback (usually leave OFF)")
-        self.web_safe_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.web_safe_check.setToolTip(
-            "Re-encode every clip to a browser-playable H.264 file.\n\n"
-            "Leave this OFF if you deliver the original file and a server/host makes\n"
-            "the web/streaming version — then a plain copy keeps the original quality\n"
-            "at a smaller size and exports in seconds (HEVC plays on modern devices).\n\n"
-            "Tick it only if the exported clips themselves must play in Chrome/Firefox:\n"
-            "• H.265/HEVC footage is re-encoded to H.264 (GPU if available); H.264 is\n"
-            "  stream-copied. Web-optimised (fast-start). Re-encoding is slower and can\n"
-            "  make files larger than an efficient HEVC source."
+        # Export video format: re-encode to a smaller HEVC delivery file (default),
+        # keep the original (lossless copy), or browser-playable H.264.
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Export video:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItem("Smaller — HEVC (recommended)", "hevc")
+        self.format_combo.addItem("Original — no re-encode (largest, fastest)", "copy")
+        self.format_combo.addItem("Web-safe — H.264 (plays in any browser)", "h264")
+        self.format_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.format_combo.setToolTip(
+            "Smaller (HEVC): re-encode to H.265 at the chosen quality — about half\n"
+            "the size of the original, full detail kept, plays on modern devices.\n"
+            "Re-encoding takes longer than a copy.\n"
+            "Original: a lossless stream copy — largest, but exports in seconds.\n"
+            "Web-safe (H.264): for clips that must play directly in Chrome/Firefox."
         )
-        col.addWidget(self.web_safe_check)
+        self.format_combo.currentIndexChanged.connect(self._update_format_ui)
+        fmt_row.addWidget(self.format_combo, stretch=1)
+        self.crf_label = QLabel("Quality")
+        fmt_row.addWidget(self.crf_label)
+        self.crf_spin = QSpinBox()
+        self.crf_spin.setRange(16, 30)
+        self.crf_spin.setValue(22)
+        self.crf_spin.setPrefix("CRF ")
+        self.crf_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.crf_spin.setToolTip(
+            "Lower = bigger / higher quality. 22 is the detail-first setting we "
+            "validated; try 24–25 for noticeably smaller files."
+        )
+        fmt_row.addWidget(self.crf_spin)
+        col.addLayout(fmt_row)
+        self._update_format_ui()
 
         vsplit = QSplitter(Qt.Orientation.Vertical)
         vsplit.addWidget(self._build_roster_group())
@@ -606,6 +628,12 @@ class MarkerWindow(QMainWindow):
         setattr(self, f"{kind}_clear_btn", clear)
         setattr(self, f"{kind}_seconds_spin", spin)
         return row
+
+    def _update_format_ui(self):
+        """The CRF quality control only applies to a re-encode, not a plain copy."""
+        reencode = self.format_combo.currentData() != "copy"
+        self.crf_label.setEnabled(reencode)
+        self.crf_spin.setEnabled(reencode)
 
     # -------------------------------------------------------------- player
 
@@ -1492,7 +1520,8 @@ class MarkerWindow(QMainWindow):
         if not ok:
             return
 
-        web_safe = self.web_safe_check.isChecked()
+        video_mode = self.format_combo.currentData()
+        crf = self.crf_spin.value()
 
         rows = self._effective_clips()
         # Save the clip list beside the videos so it can be reloaded to fix a clip.
@@ -1505,7 +1534,7 @@ class MarkerWindow(QMainWindow):
 
         self._export_worker = ExportWorker(
             self._ffmpeg, self.video_path, rows, out_dir, folder_per_participant,
-            intro=intro, outro=outro, web_safe=web_safe,
+            intro=intro, outro=outro, video_mode=video_mode, crf=crf,
         )
         self._export_worker.rowDone.connect(self._on_export_row)
         self._export_worker.finishedResult.connect(lambda res: self._on_export_done(res, out_dir))
