@@ -150,6 +150,23 @@ Sara & Otter/
 - Choose **No** for a single flat folder instead — there the filename keeps the
   participant, `First & Dog - Search.mp4`, so the files stay unique and grouped.
 
+### Reopening a clip list to fix a clip
+
+Every **Export clips…** also drops a small **clip-list CSV** in the output folder
+(named for the search label, e.g. `Interior Search 1 clips.csv`) — a record of
+exactly where each clip is. If a clip needs fixing later, you don't have to scrub
+the whole trial to find it:
+
+1. Open the source video (or the joined file) and click **Load clip CSV…**, then
+   pick that saved file. The clips reappear, with the participant back in the
+   *Participant* field and the search label back in the **Search/event** box.
+2. **Double-click** the clip to fix — it jumps straight to that spot — nudge
+   In/Out (scrub + `↑`/`↓`), then **Update**.
+3. **Export clips…** again. It's a fast stream copy, so re-cutting is seconds.
+
+(The manual **Export CSV…** writes the same file wherever you choose, if you want
+an extra copy.)
+
 ### Intro & outro cards on every clip
 
 Want a branded title card at the **start** of every clip, and/or a card at the

@@ -253,6 +253,7 @@ class MarkerWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
         self._progress: QProgressDialog | None = None
+        self._autosaved_csv: Path | None = None  # clip list saved beside the last export
         # Optional cards added to every exported clip: intro (prepended), outro
         # (appended, e.g. a bullseye map of where the hides were).
         self.intro_image: str | None = None
@@ -1278,7 +1279,7 @@ class MarkerWindow(QMainWindow):
         )
         return (
             clips, self.in_point, self.out_point, self.editing_row,
-            self.label_edit.text(), self.exact_check.isChecked(),
+            self.label_edit.text(), self.search_edit.text(), self.exact_check.isChecked(),
             tuple(self._available), tuple(self._roster_all), tuple(self._run_order),
         )
 
@@ -1290,6 +1291,7 @@ class MarkerWindow(QMainWindow):
             "out_point": self.out_point,
             "editing_row": self.editing_row,
             "label": self.label_edit.text(),
+            "search": self.search_edit.text(),
             "exact": self.exact_check.isChecked(),
             "available": list(self._available),
             "roster_all": list(self._roster_all),
@@ -1306,6 +1308,7 @@ class MarkerWindow(QMainWindow):
         self._available = list(snap["available"])
         self._run_order = list(snap["run_order"])
         self.exact_check.setChecked(snap["exact"])
+        self.search_edit.setText(snap["search"])
         self.label_edit.setText(snap["label"])
         self.add_btn.setText("Update clip" if self.editing_row is not None else "Add clip")
         self._refresh_table()
@@ -1412,10 +1415,42 @@ class MarkerWindow(QMainWindow):
             self, "Load CSV", f"Replace the current {len(self.clips)} clips with {len(rows)} from the file?"
         ) != QMessageBox.StandardButton.Yes:
             return
+        self._absorb_loaded_search(rows)
         self.clips = rows
         self.clear_marks()
         self._refresh_table()
         self.statusBar().showMessage(f"Loaded {len(rows)} clips from {Path(path).name}", 5000)
+
+    def _absorb_loaded_search(self, rows) -> str:
+        """Split each ``Participant - Search`` label back into the participant
+        (the clip's label) and the search/event label (the Search box), so a
+        reloaded clip list is editable and re-exports to the right participant
+        folder. Uses the most common search across the rows. Returns it."""
+        searches: list[str] = []
+        for c in rows:
+            if " - " in c.label:
+                participant, search = c.label.split(" - ", 1)
+                c.label = participant.strip()
+                c.source_participant = c.label or None
+                searches.append(search.strip())
+        if searches:
+            common = max(set(searches), key=searches.count)
+            self.search_edit.setText(common)
+            return common
+        return ""
+
+    def _autosave_clip_list(self, out_dir: str, rows) -> "Path | None":
+        """Save the clip list as a CSV next to the exported videos, so it can be
+        reloaded later (Load clip CSV…) to tweak a clip without re-marking.
+        Named for the search label; best-effort — never fails the export."""
+        search = self.search_edit.text().strip()
+        stem = naming.sanitize_label(f"{search} clips" if search else "clips")
+        path = Path(out_dir) / f"{stem}.csv"
+        try:
+            clips_mod.write_csv(path, rows)
+            return path
+        except OSError:
+            return None
 
     def export_clips(self):
         if not self._require_clips():
@@ -1457,6 +1492,8 @@ class MarkerWindow(QMainWindow):
         web_safe = self.web_safe_check.isChecked()
 
         rows = self._effective_clips()
+        # Save the clip list beside the videos so it can be reloaded to fix a clip.
+        self._autosaved_csv = self._autosave_clip_list(out_dir, rows)
         self._progress = QProgressDialog("Cutting clips…", "Cancel", 0, len(rows), self)
         self._progress.setWindowTitle("Export clips")
         self._progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -1484,6 +1521,9 @@ class MarkerWindow(QMainWindow):
             self._progress = None
         written = len(result.written)
         lines = [f"Wrote {written}/{result.total} clips in {result.elapsed:.1f}s into:\n{out_dir}"]
+        if getattr(self, "_autosaved_csv", None):
+            lines.append(f"\nClip list saved as “{self._autosaved_csv.name}” — "
+                         "use Load clip CSV… to reopen and tweak a clip later.")
         if result.problems:
             lines.append("\nSkipped / failed:")
             lines += [f"  • row {o.rownum} {o.label}: {o.reason}" for o in result.problems]

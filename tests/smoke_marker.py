@@ -87,6 +87,20 @@ def main():
     assert clips_mod.read_csv(tmp_csv)[0].label == "Jones & Bella - NW3_Interior"
     tmp_csv.unlink()
 
+    # Auto-save beside the export, then reload: the combined label splits back
+    # into participant (clip label) + search (Search box), ready to edit/re-export.
+    saved = win._autosave_clip_list(str(root / "tests"), eff)
+    assert saved and saved.exists() and saved.name == "NW3_Interior clips.csv", saved
+    reloaded = clips_mod.read_csv(saved)
+    win.search_edit.clear()
+    common = win._absorb_loaded_search(reloaded)
+    assert common == "NW3_Interior" and win.search_edit.text() == "NW3_Interior", common
+    assert reloaded[0].label == "Jones & Bella", reloaded[0].label
+    assert reloaded[0].source_participant == "Jones & Bella", reloaded[0].source_participant
+    saved.unlink()
+    win.search_edit.setText("NW3_Interior")  # restore for the cuts below
+    print("clip-list auto-save + reload restores participant + search")
+
     # Flat export keeps the participant in the filename (so names stay unique).
     out_dir = root / "tests" / "_tmp_out"
     result = cutter.run_batch(find_ffmpeg(), video, eff, out_dir)
