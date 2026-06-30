@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from PySide6.QtCore import QPoint, QRect, Qt, QObject, QUrl, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QObject, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -106,11 +106,29 @@ class VideoCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._image: QImage | None = None
+        # Locked display aspect ratio (the video's native size). The letterbox is
+        # computed from this, NOT from each frame's pixel size -- so a backend that
+        # delivers frames at a jittering coded size during seeking (e.g. Qt's
+        # FFmpeg HEVC decoder emitting 3840x2176 vs the real 3840x2160) can't make
+        # the picture wobble/flicker. None until the media's resolution is known.
+        self._aspect: QSize | None = None
         self.setMinimumHeight(360)
         self.setAutoFillBackground(True)
         pal = self.palette()
         pal.setColor(self.backgroundRole(), QColor("black"))
         self.setPalette(pal)
+
+    def aspect(self) -> QSize | None:
+        return self._aspect
+
+    def set_aspect(self, size: QSize | None) -> None:
+        """Lock the letterbox to the video's native aspect ratio. Pass None to
+        clear it (e.g. when loading a new file)."""
+        if size is not None and size.isValid() and size.width() > 0 and size.height() > 0:
+            self._aspect = QSize(size.width(), size.height())
+        else:
+            self._aspect = None
+        self.update()
 
     def set_image(self, image: QImage, immediate: bool = False) -> None:
         self._image = image
@@ -131,7 +149,13 @@ class VideoCanvas(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.GlobalColor.black)
         if self._image is not None and not self._image.isNull():
-            fitted = self._image.size().scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+            # Fit using the locked native aspect when known, so the letterbox
+            # stays put even if a stray frame arrives at a different pixel size;
+            # the frame is then drawn into that stable rect (slight scale at most,
+            # never a flicker). Fall back to the frame's own size before the
+            # resolution is known.
+            source = self._aspect if (self._aspect is not None and self._aspect.isValid()) else self._image.size()
+            fitted = source.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
             x = (self.width() - fitted.width()) // 2
             y = (self.height() - fitted.height()) // 2
             painter.drawImage(QRect(QPoint(x, y), fitted), self._image)
@@ -180,6 +204,7 @@ class QtVideoPlayer(VideoPlayer):
         self._user_playing = False
         self._prime = False
         self._canvas.clear()
+        self._canvas.set_aspect(None)  # re-locked from the new file's resolution
         self._player.setSource(QUrl.fromLocalFile(path))
 
     def play(self) -> None:
@@ -220,6 +245,11 @@ class QtVideoPlayer(VideoPlayer):
         if frame is not None and frame.isValid():
             image = frame.toImage()
             if not image.isNull():
+                # Lock the display aspect from the first good frame if metadata
+                # hasn't provided the resolution yet (keeps the picture stable
+                # even when Resolution metadata is missing).
+                if self._canvas.aspect() is None:
+                    self._canvas.set_aspect(image.size())
                 # Paint immediately when not actively playing, so scrubbing/
                 # stepping shows each frame live instead of a stale one.
                 self._canvas.set_image(image, immediate=not self._user_playing)
@@ -253,6 +283,11 @@ class QtVideoPlayer(VideoPlayer):
             except (TypeError, ValueError):
                 rate = 0.0
             self._fps = rate if rate and rate > 0 else DEFAULT_FPS
+            # Lock the letterbox to the native display resolution so per-frame
+            # coded-size jitter during seeking can't change the picture's shape.
+            resolution = meta.value(QMediaMetaData.Key.Resolution)
+            if isinstance(resolution, QSize) and resolution.isValid():
+                self._canvas.set_aspect(resolution)
             self.loaded.emit(self._fps)
             # Prime the first frame so the picture isn't black before Play.
             if not self._user_playing:

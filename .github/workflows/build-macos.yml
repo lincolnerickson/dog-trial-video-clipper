@@ -9,6 +9,9 @@ on:
   push:
     tags: ["v*"]
 
+permissions:
+  contents: write   # so a tagged build can publish a GitHub Release
+
 jobs:
   build:
     name: Build (${{ matrix.arch }})
@@ -68,3 +71,18 @@ jobs:
           name: DogTrialVideoClipper-macOS-${{ matrix.arch }}
           path: DogTrialVideoClipper-macOS-${{ matrix.arch }}.zip
           if-no-files-found: error
+
+      - name: Publish to the GitHub Release (tagged builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ZIP="DogTrialVideoClipper-macOS-${{ matrix.arch }}.zip"
+          # First arch to finish creates the release; the other appends its asset.
+          # (--clobber on upload makes re-runs idempotent.)
+          gh release create "$TAG" \
+            --title "Dog Trial Video Clipper $TAG (macOS)" \
+            --notes-file packaging/RELEASE_NOTES.md \
+            "$ZIP" \
+          || gh release upload "$TAG" "$ZIP" --clobber
