@@ -30,7 +30,7 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QFont, QKeySequence, QShortcut
+from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -85,6 +85,20 @@ ARROW_STEP_SHIFT = 10.0  # seconds per press when Shift is held
 PARTICIPANT_PLACEHOLDER = "click a participant (or type a name) — clip auto-adds on Out"
 # Header-ish first lines tolerated (and skipped) when loading a running-order file.
 RUN_ORDER_HEADERS = {"participant", "participants", "name", "running order", "handler dog"}
+
+
+def _mono_font() -> QFont:
+    """A monospace font that exists on BOTH Windows and macOS.
+
+    The timecode readouts must be monospace so their width stays constant as the
+    digits change — otherwise, while scrubbing, the labels reflow every frame and
+    the whole layout visibly shifts back and forth. ``Consolas`` is Windows-only,
+    so we ask Qt for the platform's guaranteed fixed-pitch font (Consolas/Courier
+    New on Windows, Menlo on macOS) and render it at the default UI size."""
+    fixed = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+    font = QFont(fixed.family())
+    font.setStyleHint(QFont.StyleHint.Monospace)
+    return font
 
 
 def _is_clip_csv(path: str) -> bool:
@@ -272,7 +286,7 @@ class MarkerWindow(QMainWindow):
         col.addWidget(self.slider)
 
         self.time_label = QLabel("00:00:00.000 / 00:00:00.000")
-        self.time_label.setFont(QFont("Consolas"))
+        self.time_label.setFont(_mono_font())
         self.fps_label = QLabel("fps —")
         time_row = QHBoxLayout()
         time_row.addWidget(self.time_label)
@@ -326,7 +340,7 @@ class MarkerWindow(QMainWindow):
         self.out_label = QLabel("Out —")
         self.dur_label = QLabel("len —")
         for w in (self.in_label, self.out_label, self.dur_label):
-            w.setFont(QFont("Consolas"))
+            w.setFont(_mono_font())
             w.setMinimumWidth(130)
         r1.addWidget(self.in_btn)
         r1.addWidget(self.in_label)

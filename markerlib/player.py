@@ -184,7 +184,8 @@ class QtVideoPlayer(VideoPlayer):
         self._fps = DEFAULT_FPS
         self._rate = 1.0
         self._user_playing = False
-        self._prime = False     # show the first frame on load without playing
+        self._prime = False       # a prime cycle is currently in progress
+        self._has_primed = False  # priming happens once per file, not per buffer event
 
         self._sink.videoFrameChanged.connect(self._on_frame)
         self._player.positionChanged.connect(self._on_position)
@@ -203,6 +204,7 @@ class QtVideoPlayer(VideoPlayer):
         self._fps = DEFAULT_FPS
         self._user_playing = False
         self._prime = False
+        self._has_primed = False
         self._canvas.clear()
         self._canvas.set_aspect(None)  # re-locked from the new file's resolution
         self._player.setSource(QUrl.fromLocalFile(path))
@@ -285,14 +287,20 @@ class QtVideoPlayer(VideoPlayer):
             self._fps = rate if rate and rate > 0 else DEFAULT_FPS
             # Lock the letterbox to the native display resolution so per-frame
             # coded-size jitter during seeking can't change the picture's shape.
+            # (Read every time so it's picked up whenever it becomes available.)
             resolution = meta.value(QMediaMetaData.Key.Resolution)
             if isinstance(resolution, QSize) and resolution.isValid():
                 self._canvas.set_aspect(resolution)
-            self.loaded.emit(self._fps)
-            # Prime the first frame so the picture isn't black before Play.
-            if not self._user_playing:
-                self._prime = True
-                self._player.play()
+            # Announce load + prime the first frame ONCE per file. This status can
+            # re-fire (e.g. BufferedMedia after a seek); priming again would
+            # briefly replay/advance the picture and toggle the play state, which
+            # on macOS shows up as the picture and UI jittering while scrubbing.
+            if not self._has_primed:
+                self._has_primed = True
+                self.loaded.emit(self._fps)
+                if not self._user_playing:
+                    self._prime = True
+                    self._player.play()
 
     def _on_error(self, _error, message: str = "") -> None:
         self.errorOccurred.emit(message or "playback error")
