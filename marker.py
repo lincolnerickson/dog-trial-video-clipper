@@ -23,7 +23,9 @@ scrubbing engine can be swapped without touching this UI.
 
 from __future__ import annotations
 
+import copy
 import csv
+import functools
 import os
 import re
 import sys
@@ -80,6 +82,7 @@ IMAGE_FILTER = (
 )
 SPEEDS = [0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 8.0]
 SHUTTLE = [1.0, 2.0, 4.0, 8.0]
+UNDO_LIMIT = 100         # most recent undoable actions kept on the stack
 ARROW_STEP = 0.75        # seconds a single ← / → tap moves the playhead
 ARROW_STEP_SHIFT = 10.0  # seconds per press when Shift is held (fixed jump, no ramp)
 ARROW_STEP_ACCEL = 0.3   # extra seconds added per held-key repeat — hold to scrub faster
@@ -101,6 +104,31 @@ def _mono_font() -> QFont:
     font = QFont(fixed.family())
     font.setStyleHint(QFont.StyleHint.Monospace)
     return font
+
+
+def _undoable(method):
+    """Mark a window method as one undo step.
+
+    Snapshots the editable state *before* the action; if the action actually
+    changed anything, the snapshot is pushed onto the undo stack afterward. A
+    re-entrancy depth guard means a gesture that fans out into several decorated
+    calls (e.g. setting Out auto-adds a clip) records exactly ONE undo step, and
+    actions that change nothing (a no-op move, a cancelled dialog) record none."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        outermost = self._action_depth == 0
+        before_snap = self._snapshot() if outermost else None
+        before_sig = self._state_signature() if outermost else None
+        self._action_depth += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._action_depth -= 1
+            if outermost and self._state_signature() != before_sig:
+                self._undo_stack.append(before_snap)
+                del self._undo_stack[:-UNDO_LIMIT]
+                self._update_undo_ui()
+    return wrapper
 
 
 def _is_clip_csv(path: str) -> bool:
@@ -219,6 +247,8 @@ class MarkerWindow(QMainWindow):
         self.editing_row: int | None = None
         self._scrubbing = False
         self._arrow_held = 0     # consecutive ←/→ auto-repeats, for hold-to-accelerate
+        self._undo_stack: list[dict] = []
+        self._action_depth = 0   # re-entrancy guard so one gesture = one undo step
         self._ffmpeg: str | None = None
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
@@ -247,6 +277,10 @@ class MarkerWindow(QMainWindow):
         # list/table/button has focus -- those widgets would otherwise eat them
         # for type-ahead search. Text fields are exempted (so names type normally).
         QApplication.instance().installEventFilter(self)
+
+        # Undo the last action with the platform-native shortcut (Ctrl+Z / ⌘Z).
+        undo_sc = QShortcut(QKeySequence.StandardKey.Undo, self)
+        undo_sc.activated.connect(self.undo)
 
         if initial_video:
             self.load_video(initial_video)
@@ -511,6 +545,13 @@ class MarkerWindow(QMainWindow):
         rb.addWidget(self._btn("↑", self.move_up, focusable=True))
         rb.addWidget(self._btn("↓", self.move_down, focusable=True))
         rb.addStretch(1)
+        self.undo_btn = self._btn("Undo", self.undo, focusable=True)
+        self.undo_btn.setToolTip(
+            "Undo the last action — set In/Out, assign a name, add/delete a clip,\n"
+            "reorder, clear, load… (Ctrl+Z / ⌘Z)"
+        )
+        self.undo_btn.setEnabled(False)
+        rb.addWidget(self.undo_btn)
         rb.addWidget(self._btn("Clear all", self.clear_all, focusable=True))
         v.addLayout(rb)
 
@@ -802,6 +843,7 @@ class MarkerWindow(QMainWindow):
             return
         self._load_roster_path(path)
 
+    @_undoable
     def _load_roster_path(self, path: str) -> bool:
         try:
             names = roster.load_participants(path)
@@ -851,6 +893,7 @@ class MarkerWindow(QMainWindow):
         self._available.insert(pos, name)
         self._refresh_roster()
 
+    @_undoable
     def restore_all_participants(self):
         if not self._roster_all:
             return
@@ -859,6 +902,7 @@ class MarkerWindow(QMainWindow):
         self._refresh_roster()
         self.statusBar().showMessage("Roster restored (participants used by clips stay consumed).", 4000)
 
+    @_undoable
     def _pick_participant(self, text: str):
         self.label_edit.setText(text)
         self._update_preview()
@@ -927,6 +971,7 @@ class MarkerWindow(QMainWindow):
                 order.append(name)
         return order
 
+    @_undoable
     def save_running_order(self):
         order = self._running_order_from_clips()
         if not order:
@@ -960,6 +1005,7 @@ class MarkerWindow(QMainWindow):
             "Load it (or just the same roster) for the next view.", 8000,
         )
 
+    @_undoable
     def load_running_order(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Use saved running order", "", "Text/CSV (*.txt *.csv);;All files (*)"
@@ -991,6 +1037,7 @@ class MarkerWindow(QMainWindow):
 
     # -------------------------------------------------------------- marking
 
+    @_undoable
     def set_in(self):
         if not self._require_video():
             return
@@ -1000,6 +1047,7 @@ class MarkerWindow(QMainWindow):
         self._update_marks_ui()
         self._maybe_autocommit()
 
+    @_undoable
     def set_out(self):
         if not self._require_video():
             return
@@ -1019,6 +1067,7 @@ class MarkerWindow(QMainWindow):
             return
         self.add_or_update_clip()
 
+    @_undoable
     def clear_marks(self):
         self.in_point = None
         self.out_point = None
@@ -1061,6 +1110,7 @@ class MarkerWindow(QMainWindow):
             self.preview_label.setText("→ —")
         self._update_next_up()
 
+    @_undoable
     def add_or_update_clip(self):
         if not self._require_video():
             return
@@ -1141,6 +1191,7 @@ class MarkerWindow(QMainWindow):
         if 0 <= row < len(self.clips):
             self.table.selectRow(row)
 
+    @_undoable
     def edit_selected(self):
         row = self._selected_row()
         if row is None:
@@ -1165,6 +1216,7 @@ class MarkerWindow(QMainWindow):
         # name field or a roster name.
         self._focus_video()
 
+    @_undoable
     def delete_selected(self):
         row = self._selected_row()
         if row is None:
@@ -1180,6 +1232,7 @@ class MarkerWindow(QMainWindow):
         self._select_row(min(row, len(self.clips) - 1))
         self.statusBar().showMessage(f"Deleted clip: {name}", 3000)
 
+    @_undoable
     def move_up(self):
         row = self._selected_row()
         if row is None or row == 0:
@@ -1188,6 +1241,7 @@ class MarkerWindow(QMainWindow):
         self._refresh_table()
         self._select_row(row - 1)
 
+    @_undoable
     def move_down(self):
         row = self._selected_row()
         if row is None or row >= len(self.clips) - 1:
@@ -1196,6 +1250,7 @@ class MarkerWindow(QMainWindow):
         self._refresh_table()
         self._select_row(row + 1)
 
+    @_undoable
     def clear_all(self):
         if not self.clips:
             return
@@ -1206,6 +1261,64 @@ class MarkerWindow(QMainWindow):
             self.clips.clear()
             self.clear_marks()
             self._refresh_table()
+
+    # ------------------------------------------------------------- undo
+
+    def _state_signature(self):
+        """A comparable summary of all undoable state — used to tell whether an
+        action actually changed anything (so no-ops don't create undo steps)."""
+        clips = tuple(
+            (c.start, c.end, c.label, c.exact, c.source_participant) for c in self.clips
+        )
+        return (
+            clips, self.in_point, self.out_point, self.editing_row,
+            self.label_edit.text(), self.exact_check.isChecked(),
+            tuple(self._available), tuple(self._roster_all), tuple(self._run_order),
+        )
+
+    def _snapshot(self) -> dict:
+        """A deep-enough copy of the editable state to restore on undo."""
+        return {
+            "clips": [copy.copy(c) for c in self.clips],
+            "in_point": self.in_point,
+            "out_point": self.out_point,
+            "editing_row": self.editing_row,
+            "label": self.label_edit.text(),
+            "exact": self.exact_check.isChecked(),
+            "available": list(self._available),
+            "roster_all": list(self._roster_all),
+            "run_order": list(self._run_order),
+            "selected": self._selected_row(),
+        }
+
+    def _restore(self, snap: dict):
+        self.clips = [copy.copy(c) for c in snap["clips"]]
+        self.in_point = snap["in_point"]
+        self.out_point = snap["out_point"]
+        self.editing_row = snap["editing_row"]
+        self._roster_all = list(snap["roster_all"])
+        self._available = list(snap["available"])
+        self._run_order = list(snap["run_order"])
+        self.exact_check.setChecked(snap["exact"])
+        self.label_edit.setText(snap["label"])
+        self.add_btn.setText("Update clip" if self.editing_row is not None else "Add clip")
+        self._refresh_table()
+        self._refresh_roster()
+        self._update_marks_ui()
+        if snap["selected"] is not None:
+            self._select_row(snap["selected"])
+        self._focus_video()
+
+    def undo(self):
+        if not self._undo_stack:
+            self.statusBar().showMessage("Nothing to undo.", 2000)
+            return
+        self._restore(self._undo_stack.pop())
+        self._update_undo_ui()
+        self.statusBar().showMessage("Undo.", 1500)
+
+    def _update_undo_ui(self):
+        self.undo_btn.setEnabled(bool(self._undo_stack))
 
     # -------------------------------------------------------- validation
 
@@ -1264,6 +1377,7 @@ class MarkerWindow(QMainWindow):
             return
         self.statusBar().showMessage(f"Wrote {path}", 6000)
 
+    @_undoable
     def load_csv_dialog(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load clip list", "", "CSV files (*.csv);;All files (*)")
         if not path:

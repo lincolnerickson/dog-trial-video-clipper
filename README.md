@@ -236,6 +236,7 @@ file's last few seconds before the join. Untick it for cameras that don't do thi
 | `J` / `K` / `L` | Slower / pause / faster (fast-scrub: tap L to ramp 1×→2×→4×→8×) |
 | `↑` / `↓` | Set In / Out at the playhead (`I` / `O` also work) |
 | `Enter` | Add the clip — or, with a roster loaded, drop the next participant on (top of the list; then it auto-adds) |
+| `Ctrl+Z` / `⌘Z` | Undo the last action |
 
 The clip auto-adds the moment In, a participant, and Out are all set (in any
 order). Typing in a field is normal text — the single-key hotkeys only fire when
@@ -253,6 +254,10 @@ the hotkeys work again. Speed is also selectable from the dropdown.
   **Clear all** empties it (and restores all roster participants). **Restore
   all** re-fills the roster from the loaded file (names still used by clips stay
   consumed).
+- **Undo** (button, or **Ctrl+Z** / **⌘Z**) reverses your **last action** — a set
+  In/Out, an assigned name, an added or deleted clip, a reorder, a clear, a
+  loaded CSV/roster. Each press steps back one more action (up to 100), restoring
+  the clips, the In/Out marks, and the roster together.
 - **Validate** checks the list and reports problems (see below).
 
 ### Validation
@@ -381,6 +386,7 @@ tests/
   test_websafe.py        web-safe H.264 + fast-start delivery test  (python tests/test_websafe.py)
   test_hotkeys.py        ↑/↓ + I/O marking hotkeys fire correctly  (offscreen)
   test_run_order.py      running order saved from view 1 drives Enter in later views  (offscreen)
+  test_undo.py           undo reverses the last action (one gesture = one step)  (offscreen)
   diagnose_video.py      report a file's codec/frames if video won't show
   render_check.py        confirm frames are painted to the canvas
 sample/                  generated 4K test video + sample roster/clip CSVs (safe to delete)
