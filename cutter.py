@@ -136,7 +136,7 @@ def run_batch(
     folder_per_participant: bool = False,
     ext: str = "mp4",
     encoder: str | None = None,
-    crf: int = 18,
+    crf: int = 23,
     preset: str = "medium",
     intro: CardSpec | None = None,
     outro: CardSpec | None = None,
@@ -281,7 +281,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         "NVIDIA GPU). With --web-safe, the fastest working H.264 encoder is "
         "auto-detected when this is unset.",
     )
-    p.add_argument("--crf", type=int, default=18, help="quality for re-encoded rows (default: 18)")
+    p.add_argument("--crf", type=int, default=23, help="quality for re-encoded rows, lower=bigger/better (default: 23)")
     p.add_argument("--preset", default="medium", help="encoder preset for re-encoded rows (default: medium)")
     p.add_argument(
         "--web-safe",

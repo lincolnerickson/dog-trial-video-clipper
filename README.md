@@ -195,14 +195,22 @@ exported clip. **Clear** removes either.
 
 ### Web-safe clips (play in any browser)
 
+> **Usually leave this OFF.** If you deliver the original file and a server/host
+> makes the web/streaming version (or your buyers play on modern devices), the
+> default **lossless stream copy** is best — original quality, smaller files, and
+> instant export. Re-encoding to H.264 is slower and can make files *larger* than
+> an efficient HEVC source. Tick Web-safe only when the exported clips themselves
+> must play in Chrome/Firefox.
+
 Tick **Web-safe H.264** before exporting and every clip is written as a
 universally browser-playable H.264 file — so previews work in **Chrome, Firefox
 and Safari**, not just on Apple devices.
 
 - **H.265 / HEVC footage** (common from GoPro/phones) won't play in Chrome or
-  Firefox as-is. Web-safe **re-encodes it to H.264**, using your **GPU if one is
-  available** (NVIDIA/Intel/AMD/Apple) so even 4K stays fast; otherwise it falls
-  back to the CPU (slower).
+  Firefox as-is. Web-safe **re-encodes it to H.264** at a delivery quality
+  (**CRF 23** by default — good quality, sensible size), using your **GPU if one
+  is available** (NVIDIA/Intel/AMD/Apple) so even 4K stays fast; otherwise it
+  falls back to the CPU (slower).
 - **H.264 footage** is already browser-friendly, so it's **stream-copied
   unchanged** (no quality loss, instant).
 - Either way the file is **web-optimised (fast-start)**: the index sits at the
@@ -312,7 +320,7 @@ Options:
 | `--ffmpeg` | auto | explicit ffmpeg path |
 | `--web-safe` | off | write browser-playable H.264 (yuv420p, fast-start): H.265 re-encoded, H.264 stream-copied; auto-uses the fastest H.264 encoder (GPU if any) |
 | `--encoder` | auto | encoder for re-encoded rows — `exact` rows and `--web-safe` (e.g. `h264_nvenc`); default `libx264`, or auto-detected for `--web-safe` |
-| `--crf` / `--preset` | `18` / `medium` | quality/speed for re-encoded rows |
+| `--crf` / `--preset` | `23` / `medium` | quality/speed for re-encoded rows (lower CRF = bigger/better) |
 | `--intro-image` | none | image to prepend as an intro card to every clip (H.264/H.265 sources; body still stream-copied) |
 | `--intro-seconds` | `3` | how long the intro card is shown |
 | `--outro-image` | none | image to append as an outro card to every clip (e.g. marking where the hides were) |

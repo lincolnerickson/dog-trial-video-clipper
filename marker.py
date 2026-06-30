@@ -448,14 +448,17 @@ class MarkerWindow(QMainWindow):
 
         # Web-safe delivery: re-encode to universal H.264 so clips play in any
         # browser (HEVC footage otherwise won't play in Chrome/Firefox).
-        self.web_safe_check = QCheckBox("Web-safe H.264 — clips play in any browser (Chrome/Firefox/Safari)")
+        self.web_safe_check = QCheckBox("Web-safe H.264 — for browser playback (usually leave OFF)")
         self.web_safe_check.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.web_safe_check.setToolTip(
-            "Make every exported clip a browser-playable H.264 file.\n"
-            "• H.265/HEVC footage is re-encoded to H.264 (uses the GPU if available;\n"
-            "  slower than a plain copy, but plays everywhere).\n"
-            "• H.264 footage is stream-copied unchanged.\n"
-            "Either way the file is web-optimised (fast-start) for instant preview."
+            "Re-encode every clip to a browser-playable H.264 file.\n\n"
+            "Leave this OFF if you deliver the original file and a server/host makes\n"
+            "the web/streaming version — then a plain copy keeps the original quality\n"
+            "at a smaller size and exports in seconds (HEVC plays on modern devices).\n\n"
+            "Tick it only if the exported clips themselves must play in Chrome/Firefox:\n"
+            "• H.265/HEVC footage is re-encoded to H.264 (GPU if available); H.264 is\n"
+            "  stream-copied. Web-optimised (fast-start). Re-encoding is slower and can\n"
+            "  make files larger than an efficient HEVC source."
         )
         col.addWidget(self.web_safe_check)
 
