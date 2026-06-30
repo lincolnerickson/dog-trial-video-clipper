@@ -474,16 +474,17 @@ class MarkerWindow(QMainWindow):
         self.bitrate_label = QLabel("Bitrate")
         fmt_row.addWidget(self.bitrate_label)
         self.bitrate_spin = QDoubleSpinBox()
-        self.bitrate_spin.setRange(1.0, 12.0)
-        self.bitrate_spin.setValue(4.5)
-        self.bitrate_spin.setSingleStep(0.5)
+        self.bitrate_spin.setRange(2.0, 40.0)
+        self.bitrate_spin.setValue(12.0)
+        self.bitrate_spin.setSingleStep(1.0)
         self.bitrate_spin.setDecimals(1)
         self.bitrate_spin.setSuffix(" Mbps")
         self.bitrate_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.bitrate_spin.setToolTip(
             "Target bitrate for the HEVC re-encode, using your Mac's hardware\n"
-            "encoder (fast, like CapCut). ~4–5 Mbps keeps full 1080p detail at\n"
-            "about half the original size; lower = smaller files."
+            "encoder (fast, like CapCut). For high-bitrate GoPro 1080p60 footage,\n"
+            "~12–15 Mbps looks clean and is much smaller than the source; dial down\n"
+            "to find the smallest that still looks good (too low gets grainy)."
         )
         fmt_row.addWidget(self.bitrate_spin)
         col.addLayout(fmt_row)

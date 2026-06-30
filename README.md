@@ -198,11 +198,12 @@ exported clip. **Clear** removes either.
 The **Export video** dropdown picks how each clip's video is written:
 
 - **Smaller — HEVC (recommended, default):** re-encode to H.265 at a target
-  **Bitrate** (default **4.5 Mbps**) — about **half the size** of the original
-  while keeping full 1080p detail (great for zooming in), and it plays natively on
-  modern devices (iPhones, Macs, Windows 11). It uses your **Mac's hardware
-  encoder** (VideoToolbox), so it's **fast** — the same engine CapCut uses. Lower
-  the bitrate for smaller files, raise it for more detail.
+  **Bitrate** (default **12 Mbps**) — for high-bitrate GoPro 1080p60 source
+  (~30–60 Mbps), ~12–15 Mbps looks clean and is far smaller than the source,
+  keeping full detail for zooming in, and it plays natively on modern devices
+  (iPhones, Macs, Windows 11). It uses your **Mac's hardware encoder**
+  (VideoToolbox), so it's **fast** — the same engine CapCut uses. Dial the bitrate
+  down to find the smallest that still looks good (too low gets grainy).
 - **Original — no re-encode:** a **lossless stream copy** in the source's own
   codec — largest files, but exports in **seconds**. Best when you want the exact
   original, or a server/host re-encodes for you.
