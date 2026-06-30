@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QProgressDialog,
     QPushButton,
     QSlider,
@@ -504,10 +505,27 @@ class MarkerWindow(QMainWindow):
         eb.addWidget(self._btn("Load clip CSV…", self.load_csv_dialog, focusable=True))
         eb.addStretch(1)
         eb.addWidget(self._btn("Export CSV…", self.export_csv, focusable=True))
-        export_btn = self._btn("Export clips…", self.export_clips, focusable=True)
-        export_btn.setStyleSheet("font-weight: bold;")
-        eb.addWidget(export_btn)
+        self.export_clips_btn = self._btn("Export clips…", self.export_clips, focusable=True)
+        self.export_clips_btn.setStyleSheet("font-weight: bold;")
+        eb.addWidget(self.export_clips_btn)
         col.addLayout(eb)
+
+        # Inline, non-modal export progress: the cut runs in the background (on a
+        # thread + the Mac's hardware encoder) so marking can continue while it
+        # exports. Hidden until an export starts.
+        self.export_progress_row = QWidget()
+        pr = QHBoxLayout(self.export_progress_row)
+        pr.setContentsMargins(0, 0, 0, 0)
+        self.export_bar = QProgressBar()
+        self.export_bar.setTextVisible(False)
+        self.export_status = QLabel("")
+        self.export_status.setStyleSheet("color: #888;")
+        self.export_cancel_btn = self._btn("Cancel", self._cancel_export, focusable=True)
+        pr.addWidget(self.export_bar, stretch=1)
+        pr.addWidget(self.export_status)
+        pr.addWidget(self.export_cancel_btn)
+        self.export_progress_row.setVisible(False)
+        col.addWidget(self.export_progress_row)
         return panel
 
     def _build_roster_group(self) -> QWidget:
@@ -1532,11 +1550,19 @@ class MarkerWindow(QMainWindow):
         rows = self._effective_clips()
         # Save the clip list beside the videos so it can be reloaded to fix a clip.
         self._autosaved_csv = self._autosave_clip_list(out_dir, rows)
-        self._progress = QProgressDialog("Cutting clips…", "Cancel", 0, len(rows), self)
-        self._progress.setWindowTitle("Export clips")
-        self._progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self._progress.setMinimumDuration(0)
-        self._progress.setValue(0)
+
+        # Non-modal inline progress: the cut runs in the background (thread + the
+        # Mac's hardware encoder), so she can keep marking the next view meanwhile.
+        self.export_bar.setRange(0, len(rows))
+        self.export_bar.setValue(0)
+        self.export_status.setText(f"Exporting 0/{len(rows)}…")
+        self.export_cancel_btn.setEnabled(True)
+        self.export_progress_row.setVisible(True)
+        self.export_clips_btn.setEnabled(False)
+        self.statusBar().showMessage(
+            f"Exporting {len(rows)} clips in the background — keep marking; "
+            "you'll get a notice when it's done.", 6000,
+        )
 
         self._export_worker = ExportWorker(
             self._ffmpeg, self.video_path, rows, out_dir, folder_per_participant,
@@ -1544,20 +1570,26 @@ class MarkerWindow(QMainWindow):
         )
         self._export_worker.rowDone.connect(self._on_export_row)
         self._export_worker.finishedResult.connect(lambda res: self._on_export_done(res, out_dir))
-        self._progress.canceled.connect(self._export_worker.requestInterruption)
         self._export_worker.start()
+        self._focus_video()   # hand focus back so the marking hotkeys work right away
+
+    def _cancel_export(self):
+        if self._export_worker:
+            self._export_worker.requestInterruption()
+            self.export_cancel_btn.setEnabled(False)
+            self.export_status.setText("Cancelling…")
 
     def _on_export_row(self, rownum: int, total: int, outcome):
-        if self._progress:
-            self._progress.setValue(rownum)
-            self._progress.setLabelText(f"Cut {rownum}/{total}: {outcome.filename}")
+        self.export_bar.setRange(0, total)
+        self.export_bar.setValue(rownum)
+        self.export_status.setText(f"Exporting {rownum}/{total}…")
 
     def _on_export_done(self, result, out_dir: str):
-        if self._progress:
-            self._progress.setValue(result.total)
-            self._progress.close()
-            self._progress = None
+        self.export_progress_row.setVisible(False)
+        self.export_clips_btn.setEnabled(True)
+        self._export_worker = None
         written = len(result.written)
+        self.statusBar().showMessage(f"✓ Exported {written}/{result.total} clips to {out_dir}", 12000)
         lines = [f"Wrote {written}/{result.total} clips in {result.elapsed:.1f}s into:\n{out_dir}"]
         if getattr(self, "_autosaved_csv", None):
             lines.append(f"\nClip list saved as “{self._autosaved_csv.name}” — "
@@ -1565,16 +1597,23 @@ class MarkerWindow(QMainWindow):
         if result.problems:
             lines.append("\nSkipped / failed:")
             lines += [f"  • row {o.rownum} {o.label}: {o.reason}" for o in result.problems]
+        # Non-modal completion: a floating notice she can act on or ignore -- it
+        # never blocks marking. Focus is handed straight back to the video.
         box = QMessageBox(self)
         box.setWindowTitle("Export complete")
         box.setIcon(QMessageBox.Icon.Information if not result.problems else QMessageBox.Icon.Warning)
         box.setText("\n".join(lines))
         open_btn = box.addButton("Open folder", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Close)
-        box.exec()
-        if box.clickedButton() == open_btn:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir))
-        self.statusBar().showMessage(f"Exported {written}/{result.total} clips to {out_dir}", 8000)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        box.buttonClicked.connect(
+            lambda b: QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir)) if b is open_btn else None
+        )
+        self._export_done_box = box
+        box.show()
+        self.activateWindow()
+        self._focus_video()
 
     def _confirm_problems(self, summary: str, action: str) -> bool:
         box = QMessageBox(self)

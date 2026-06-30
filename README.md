@@ -92,7 +92,9 @@ Launch it:
 5. Reorder, edit, or delete rows any time before export.
 6. **Export CSV…** to save the clip list, and/or **Export clips…** to cut the
    clips right now. Export asks whether to **group into a folder per participant**
-   (handler + dog) — see below.
+   (handler + dog) — see below. Cutting runs **in the background** (a progress bar
+   appears under the clip list with a Cancel button), so you can **keep marking
+   the next camera view while the current one exports.**
 
 You can also type a name directly into the *Participant* field for anyone not in
 the roster (ad-hoc entries don't consume a roster name).
