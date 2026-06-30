@@ -33,6 +33,7 @@ from clipper.ffmpeg_tools import (
     encoder_codec_family,
     find_ffmpeg,
     find_h264_encoder,
+    find_hevc_encoder,
     probe_streams,
     run_cut,
     run_cut_with_cards,
@@ -138,6 +139,7 @@ def run_batch(
     encoder: str | None = None,
     crf: int = 23,
     preset: str = "medium",
+    bitrate: int = 0,
     intro: CardSpec | None = None,
     outro: CardSpec | None = None,
     web_safe: bool = False,
@@ -180,14 +182,19 @@ def run_batch(
             else find_h264_encoder(ffmpeg)
         )
     elif mode == "hevc":
-        # Software libx265 for a *consistent* CRF across machines. Hardware HEVC
-        # encoders read the quality number very differently (e.g. NVENC CQ 22 ~ 3x
-        # the bitrate of libx265 CRF 22), so an explicit hardware --encoder is
-        # honoured but never auto-selected here.
-        reencode_encoder = (
-            encoder if (encoder and encoder_codec_family(encoder) == "hevc")
-            else "libx265"
-        )
+        if bitrate:
+            # A target bitrate is portable, so use the fastest working HEVC
+            # encoder -- the GPU/hardware one (VideoToolbox on a Mac) -> CapCut-
+            # class speed. Honour an explicit hevc --encoder.
+            reencode_encoder = encoder or find_hevc_encoder(ffmpeg)
+        else:
+            # CRF (no bitrate): force software libx265 for a *consistent* CRF
+            # across machines -- hardware encoders read the quality number very
+            # differently (NVENC CQ 22 ~ 3x libx265 CRF 22's bitrate).
+            reencode_encoder = (
+                encoder if (encoder and encoder_codec_family(encoder) == "hevc")
+                else "libx265"
+            )
 
     # The cards / re-encode all match the (single) source, so probe it once and
     # reuse each encoded card across every row (cached .ts files cleaned up after).
@@ -227,14 +234,14 @@ def run_batch(
                 ffmpeg, video, clip.start, clip.end, dest,
                 intro=intro, outro=outro,
                 exact=clip.exact, encoder=cut_encoder, crf=crf, preset=preset,
-                video_mode=mode, src_info=src_info, card_cache=card_cache,
-                dry_run=dry_run,
+                bitrate=bitrate, video_mode=mode, src_info=src_info,
+                card_cache=card_cache, dry_run=dry_run,
             )
         else:
             cut = run_cut(
                 ffmpeg, video, clip.start, clip.end, dest,
                 exact=clip.exact, encoder=cut_encoder, crf=crf, preset=preset,
-                video_mode=mode, src_info=src_info, dry_run=dry_run,
+                bitrate=bitrate, video_mode=mode, src_info=src_info, dry_run=dry_run,
             )
         if cut.ok:
             outcome = RowOutcome(
@@ -294,6 +301,8 @@ def parse_args(argv=None) -> argparse.Namespace:
     )
     p.add_argument("--crf", type=int, default=23, help="quality for re-encoded rows, lower=bigger/better (default: 23)")
     p.add_argument("--preset", default="medium", help="encoder preset for re-encoded rows (default: medium)")
+    p.add_argument("--bitrate", type=int, default=0, help="for --video-mode hevc: target video bitrate in kbps "
+                   "(e.g. 4000). Uses the fastest HEVC encoder (hardware/GPU). 0 = use --crf with libx265 instead.")
     p.add_argument(
         "--video-mode",
         choices=("copy", "hevc", "h264"),
@@ -407,9 +416,13 @@ def main(argv=None) -> int:
         print(f"outro  : {Path(args.outro_image).name} for {args.outro_seconds:g}s on every clip")
     video_mode = "h264" if args.web_safe else args.video_mode
     if video_mode == "hevc":
-        enc = (args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "hevc")
-               else "libx265")
-        print(f"video  : re-encode to HEVC at crf {args.crf} (via {enc})")
+        if args.bitrate:
+            enc = args.encoder or find_hevc_encoder(ffmpeg)
+            print(f"video  : re-encode to HEVC at {args.bitrate}k (via {enc})")
+        else:
+            enc = (args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "hevc")
+                   else "libx265")
+            print(f"video  : re-encode to HEVC at crf {args.crf} (via {enc})")
     elif video_mode == "h264":
         enc = (args.encoder if (args.encoder and encoder_codec_family(args.encoder) == "h264")
                else find_h264_encoder(ffmpeg))
@@ -433,7 +446,7 @@ def main(argv=None) -> int:
     result = run_batch(
         ffmpeg, video, rows, out_dir,
         folder_per_participant=args.folder_per_participant, ext=args.ext,
-        encoder=args.encoder, crf=args.crf, preset=args.preset,
+        encoder=args.encoder, crf=args.crf, preset=args.preset, bitrate=args.bitrate,
         intro=intro, outro=outro,
         video_mode=video_mode, dry_run=args.dry_run, progress=on_progress,
     )

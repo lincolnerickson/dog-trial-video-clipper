@@ -168,7 +168,7 @@ class ExportWorker(QThread):
     finishedResult = Signal(object)      # BatchResult
 
     def __init__(self, ffmpeg, video, rows, out_dir, folder_per_participant,
-                 intro=None, outro=None, video_mode="copy", crf=22):
+                 intro=None, outro=None, video_mode="copy", crf=23, bitrate=0):
         super().__init__()
         self.ffmpeg = ffmpeg
         self.video = video
@@ -179,6 +179,7 @@ class ExportWorker(QThread):
         self.outro = outro
         self.video_mode = video_mode
         self.crf = crf
+        self.bitrate = bitrate
 
     def run(self):
         result = cutter.run_batch(
@@ -188,6 +189,7 @@ class ExportWorker(QThread):
             outro=self.outro,
             video_mode=self.video_mode,
             crf=self.crf,
+            bitrate=self.bitrate,
             progress=lambda rn, tot, o: self.rowDone.emit(rn, tot, o),
             cancel=self.isInterruptionRequested,
         )
@@ -469,18 +471,21 @@ class MarkerWindow(QMainWindow):
         )
         self.format_combo.currentIndexChanged.connect(self._update_format_ui)
         fmt_row.addWidget(self.format_combo, stretch=1)
-        self.crf_label = QLabel("Quality")
-        fmt_row.addWidget(self.crf_label)
-        self.crf_spin = QSpinBox()
-        self.crf_spin.setRange(16, 30)
-        self.crf_spin.setValue(22)
-        self.crf_spin.setPrefix("CRF ")
-        self.crf_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.crf_spin.setToolTip(
-            "Lower = bigger / higher quality. 22 is the detail-first setting we "
-            "validated; try 24–25 for noticeably smaller files."
+        self.bitrate_label = QLabel("Bitrate")
+        fmt_row.addWidget(self.bitrate_label)
+        self.bitrate_spin = QDoubleSpinBox()
+        self.bitrate_spin.setRange(1.0, 12.0)
+        self.bitrate_spin.setValue(4.5)
+        self.bitrate_spin.setSingleStep(0.5)
+        self.bitrate_spin.setDecimals(1)
+        self.bitrate_spin.setSuffix(" Mbps")
+        self.bitrate_spin.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.bitrate_spin.setToolTip(
+            "Target bitrate for the HEVC re-encode, using your Mac's hardware\n"
+            "encoder (fast, like CapCut). ~4–5 Mbps keeps full 1080p detail at\n"
+            "about half the original size; lower = smaller files."
         )
-        fmt_row.addWidget(self.crf_spin)
+        fmt_row.addWidget(self.bitrate_spin)
         col.addLayout(fmt_row)
         self._update_format_ui()
 
@@ -630,10 +635,10 @@ class MarkerWindow(QMainWindow):
         return row
 
     def _update_format_ui(self):
-        """The CRF quality control only applies to a re-encode, not a plain copy."""
-        reencode = self.format_combo.currentData() != "copy"
-        self.crf_label.setEnabled(reencode)
-        self.crf_spin.setEnabled(reencode)
+        """The bitrate control applies to the HEVC ('Smaller') re-encode only."""
+        is_hevc = self.format_combo.currentData() == "hevc"
+        self.bitrate_label.setEnabled(is_hevc)
+        self.bitrate_spin.setEnabled(is_hevc)
 
     # -------------------------------------------------------------- player
 
@@ -1521,7 +1526,7 @@ class MarkerWindow(QMainWindow):
             return
 
         video_mode = self.format_combo.currentData()
-        crf = self.crf_spin.value()
+        bitrate = int(self.bitrate_spin.value() * 1000) if video_mode == "hevc" else 0
 
         rows = self._effective_clips()
         # Save the clip list beside the videos so it can be reloaded to fix a clip.
@@ -1534,7 +1539,7 @@ class MarkerWindow(QMainWindow):
 
         self._export_worker = ExportWorker(
             self._ffmpeg, self.video_path, rows, out_dir, folder_per_participant,
-            intro=intro, outro=outro, video_mode=video_mode, crf=crf,
+            intro=intro, outro=outro, video_mode=video_mode, bitrate=bitrate,
         )
         self._export_worker.rowDone.connect(self._on_export_row)
         self._export_worker.finishedResult.connect(lambda res: self._on_export_done(res, out_dir))

@@ -128,6 +128,14 @@ def main():
         "HEVC re-encode should be smaller than a stream copy"
     print("source -> smaller HEVC, fast-start, clean decode")
 
+    # The bitrate path (used for the fast hardware encoders) targets a bitrate
+    # rather than a CRF -- a target bitrate is portable across encoders.
+    from clipper.ffmpeg_tools import build_cut_command  # noqa: E402
+    cmd = build_cut_command(ff, sample, 0.0, 3.0, tmp / "x.mp4",
+                            video_mode="hevc", bitrate=4000, encoder="hevc_nvenc")
+    assert "-b:v" in cmd and "4000k" in cmd and "hvc1" in cmd and "-crf" not in cmd, cmd
+    print("hevc bitrate path emits a target-bitrate command (no CRF)")
+
     for p in (hevc_src, out_hevc, out_h264, out_copy, out_smaller):
         p.unlink()
     tmp.rmdir()

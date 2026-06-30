@@ -87,6 +87,7 @@ def build_cut_command(
     encoder: str = "libx264",
     crf: int = 23,
     preset: str = "medium",
+    bitrate: int = 0,
     web_safe: bool = False,
     video_mode: str = "copy",
     src_info: "StreamInfo | None" = None,
@@ -124,12 +125,13 @@ def build_cut_command(
     mode = video_mode if video_mode in ("hevc", "h264") else ("h264" if web_safe else "copy")
 
     if mode == "hevc":
-        # Re-encode to HEVC at a constant-quality target. Keep the source's own
-        # audio when it's already AAC (lossless, instant); hvc1 tag for Apple/NLE.
+        # Re-encode to HEVC. A target ``bitrate`` (kbps) drives the fast hardware
+        # encoders predictably; otherwise fall back to a libx265 CRF. Keep the
+        # source's own audio when it's already AAC; hvc1 tag for Apple/NLE.
         audio = "copy" if (src_info and src_info.has_audio and src_info.acodec == "aac") else "aac"
+        vq = bitrate_args(encoder, bitrate) if bitrate else h264_quality_args(encoder, crf, preset)
         cmd += (
-            ["-c:v", encoder]
-            + h264_quality_args(encoder, crf, preset)
+            ["-c:v", encoder] + vq
             + ["-tag:v", "hvc1", "-c:a", audio, "-movflags", "+faststart"]
         )
     elif mode == "h264":
@@ -173,6 +175,7 @@ def run_cut(
     encoder: str = "libx264",
     crf: int = 23,
     preset: str = "medium",
+    bitrate: int = 0,
     web_safe: bool = False,
     video_mode: str = "copy",
     src_info: "StreamInfo | None" = None,
@@ -182,7 +185,7 @@ def run_cut(
     out_path = Path(out_path)
     cmd = build_cut_command(
         ffmpeg, src, start, end, out_path,
-        exact=exact, encoder=encoder, crf=crf, preset=preset,
+        exact=exact, encoder=encoder, crf=crf, preset=preset, bitrate=bitrate,
         web_safe=web_safe, video_mode=video_mode, src_info=src_info,
     )
     if dry_run:
@@ -402,6 +405,24 @@ def h264_quality_args(encoder: str, crf: int, preset: str) -> list[str]:
     return ["-preset", preset, "-crf", str(crf)]
 
 
+def bitrate_args(encoder: str, kbps: int) -> list[str]:
+    """Target-bitrate (VBR) args for any video encoder.
+
+    Unlike CRF/quality numbers (which mean different things on each encoder), a
+    bitrate is portable -- so the *hardware* encoders (VideoToolbox on Apple,
+    NVENC, QSV) can be used and still land on a predictable file size. That's how
+    a Mac re-encodes HEVC fast (CapCut does the same): the M2's media engine at a
+    set bitrate instead of the CPU running libx265.
+    """
+    e = (encoder or "").lower()
+    rate = f"{kbps}k"
+    if "videotoolbox" in e:
+        # VideoToolbox honours -b:v; keep it simple and let it do ABR.
+        return ["-b:v", rate]
+    # libx26x / NVENC / QSV / AMF all accept a capped VBR.
+    return ["-b:v", rate, "-maxrate", f"{int(kbps * 1.5)}k", "-bufsize", f"{kbps * 2}k"]
+
+
 def _h264_safe_source(info: "StreamInfo") -> bool:
     """True if a source can be stream-copied and still be browser-playable: an
     8-bit 4:2:0 H.264. (10-bit / 4:2:2 H.264 and any H.265 need re-encoding.)"""
@@ -501,6 +522,7 @@ def build_card_ts(
 def _build_body_ts_cmd(
     ffmpeg: str, src: str | Path, start: float, end: float, dst_ts: str | Path, *,
     vcodec: str, reencode: bool, encoder: str, crf: int, preset: str, reencode_audio: bool,
+    bitrate: int = 0,
 ) -> list[str]:
     """ffmpeg args to cut one body segment to MPEG-TS (annexb).
 
@@ -519,6 +541,8 @@ def _build_body_ts_cmd(
         cmd += ["-c:v", encoder]
         if vcodec == "h264":
             cmd += h264_quality_args(encoder, crf, preset) + ["-profile:v", "high", "-pix_fmt", "yuv420p"]
+        elif bitrate:
+            cmd += bitrate_args(encoder, bitrate)
         else:
             cmd += ["-crf", str(crf), "-preset", preset]
         cmd += ["-c:a", "aac"]
@@ -597,6 +621,7 @@ def run_cut_with_cards(
     encoder: str = "libx264",
     crf: int = 23,
     preset: str = "medium",
+    bitrate: int = 0,
     web_safe: bool = False,
     video_mode: str = "copy",
     src_info: StreamInfo | None = None,
@@ -618,7 +643,7 @@ def run_cut_with_cards(
     if intro is None and outro is None:
         return run_cut(
             ffmpeg, src, start, end, out_path,
-            exact=exact, encoder=encoder, crf=crf, preset=preset,
+            exact=exact, encoder=encoder, crf=crf, preset=preset, bitrate=bitrate,
             web_safe=web_safe, video_mode=video_mode, src_info=src_info, dry_run=dry_run,
         )
 
@@ -626,7 +651,7 @@ def run_cut_with_cards(
     mode = video_mode if video_mode in ("hevc", "h264") else ("h264" if web_safe else "copy")
     # Decide the body's codec and whether it must be re-encoded:
     #   h264 -> always H.264 (re-encode unless the source already qualifies);
-    #   hevc -> always re-encode to HEVC (software here, so cards/body match);
+    #   hevc -> always re-encode to HEVC (target-bitrate encoder, or libx265 CRF);
     #   copy -> exact re-encodes to the encoder's codec, else stream-copy.
     if mode == "h264":
         body_codec = "h264"
@@ -634,7 +659,7 @@ def run_cut_with_cards(
         body_reencode = exact or not _h264_safe_source(info)
     elif mode == "hevc":
         body_codec = "hevc"
-        body_encoder = "libx265"
+        body_encoder = encoder if encoder_codec_family(encoder) == "hevc" else "libx265"
         body_reencode = True
     else:
         body_codec = encoder_codec_family(encoder) if exact else info.vcodec
@@ -676,7 +701,7 @@ def run_cut_with_cards(
         bcmd = _build_body_ts_cmd(
             ffmpeg, src, start, end, body_ts,
             vcodec=body_codec, reencode=body_reencode, encoder=body_encoder, crf=crf,
-            preset=preset, reencode_audio=reencode_audio,
+            preset=preset, reencode_audio=reencode_audio, bitrate=bitrate,
         )
         rc, err = _run_quiet(bcmd)
         if rc != 0:

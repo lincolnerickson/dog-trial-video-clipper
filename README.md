@@ -197,12 +197,12 @@ exported clip. **Clear** removes either.
 
 The **Export video** dropdown picks how each clip's video is written:
 
-- **Smaller — HEVC (recommended, default):** re-encode to H.265 at the chosen
-  quality. About **half the size** of the original while keeping full 1080p
-  detail (great for zooming in), and it plays natively on modern devices
-  (iPhones, Macs, Windows 11). The **Quality (CRF)** box sets it — lower is
-  bigger/better; **22** is the detail-first setting (≈3–4 Mbps for 1080p60), try
-  **24–25** for noticeably smaller files. Re-encoding takes longer than a copy.
+- **Smaller — HEVC (recommended, default):** re-encode to H.265 at a target
+  **Bitrate** (default **4.5 Mbps**) — about **half the size** of the original
+  while keeping full 1080p detail (great for zooming in), and it plays natively on
+  modern devices (iPhones, Macs, Windows 11). It uses your **Mac's hardware
+  encoder** (VideoToolbox), so it's **fast** — the same engine CapCut uses. Lower
+  the bitrate for smaller files, raise it for more detail.
 - **Original — no re-encode:** a **lossless stream copy** in the source's own
   codec — largest files, but exports in **seconds**. Best when you want the exact
   original, or a server/host re-encodes for you.
@@ -215,10 +215,11 @@ The **Export video** dropdown picks how each clip's video is written:
 > **Why HEVC for "smaller"?** A re-encode can't add detail beyond the source, so
 > the only way to beat the original's size *without* throwing away detail is a
 > more efficient codec — and H.265 is ~2× more efficient than H.264. CRF (quality)
-> rather than a fixed bitrate means busy/zoom-worthy moments automatically keep
-> more bitrate than calm ones. (The "Smaller" re-encode uses **libx265** for a
-> consistent CRF across machines — hardware HEVC encoders read the quality number
-> very differently.)
+> than H.264 — so a clip stays small without throwing away detail. The marker
+> drives the **hardware** HEVC encoder by a **target bitrate** (portable across
+> encoders, unlike a CRF quality number), which is what makes it fast. (The CLI
+> can also do a `libx265` CRF instead, via `--video-mode hevc --crf N` — best
+> compression, but software-slow.)
 
 ### Joining GoPro / DJI chapters into one file
 
