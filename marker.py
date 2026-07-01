@@ -31,7 +31,7 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFont, QFontDatabase, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -71,10 +71,14 @@ from clipper.ffmpeg_tools import (
     find_hevc_encoder,
     probe_duration,
 )
-from markerlib import roster
+from markerlib import applog, roster, session
 from markerlib.player import create_player
 from markerlib.widgets import ParticipantList
 import cutter
+import logging
+
+APP_VERSION = "1.0.15"
+log = logging.getLogger("clipper")
 
 VIDEO_FILTER = (
     "Video files (*.mp4 *.mov *.mkv *.avi *.m4v *.mts *.m2ts *.mxf *.wmv);;All files (*)"
@@ -183,17 +187,25 @@ class ExportWorker(QThread):
         self.bitrate = bitrate
 
     def run(self):
-        result = cutter.run_batch(
-            self.ffmpeg, self.video, self.rows, self.out_dir,
-            folder_per_participant=self.folder_per_participant,
-            intro=self.intro,
-            outro=self.outro,
-            video_mode=self.video_mode,
-            crf=self.crf,
-            bitrate=self.bitrate,
-            progress=lambda rn, tot, o: self.rowDone.emit(rn, tot, o),
-            cancel=self.isInterruptionRequested,
-        )
+        try:
+            result = cutter.run_batch(
+                self.ffmpeg, self.video, self.rows, self.out_dir,
+                folder_per_participant=self.folder_per_participant,
+                intro=self.intro,
+                outro=self.outro,
+                video_mode=self.video_mode,
+                crf=self.crf,
+                bitrate=self.bitrate,
+                progress=lambda rn, tot, o: self.rowDone.emit(rn, tot, o),
+                cancel=self.isInterruptionRequested,
+            )
+        except Exception:
+            # Never let a worker exception vanish and stall the queue: log it and
+            # report a failed batch so _pump() advances to the next job.
+            logging.getLogger("clipper").exception("export worker crashed")
+            result = cutter.BatchResult(
+                outcomes=[cutter.RowOutcome(0, "batch", "failed", reason="internal error — see log")],
+            )
         self.finishedResult.emit(result)
 
 
@@ -221,26 +233,30 @@ class JoinWorker(QThread):
         self.gop = gop
 
     def run(self):
-        outpoints = None
-        if self.trim_black:
-            outpoints = []
-            n = len(self.inputs)
-            for i, p in enumerate(self.inputs):
-                if self.isInterruptionRequested():
-                    self.finishedResult.emit(
-                        ConcatResult(False, Path(self.out_path), [], cancelled=True)
-                    )
-                    return
-                self.analyzing.emit(i + 1, n, Path(p).name)
-                outpoints.append(detect_trailing_black(self.ffmpeg, p))
-        result = concat_videos(
-            self.ffmpeg, self.inputs, self.out_path,
-            total_duration=self.total_duration,
-            outpoints=outpoints,
-            encoder=self.encoder, bitrate=self.bitrate, gop=self.gop,
-            progress=lambda secs, tot: self.progress.emit(secs, tot),
-            cancel=self.isInterruptionRequested,
-        )
+        try:
+            outpoints = None
+            if self.trim_black:
+                outpoints = []
+                n = len(self.inputs)
+                for i, p in enumerate(self.inputs):
+                    if self.isInterruptionRequested():
+                        self.finishedResult.emit(
+                            ConcatResult(False, Path(self.out_path), [], cancelled=True)
+                        )
+                        return
+                    self.analyzing.emit(i + 1, n, Path(p).name)
+                    outpoints.append(detect_trailing_black(self.ffmpeg, p))
+            result = concat_videos(
+                self.ffmpeg, self.inputs, self.out_path,
+                total_duration=self.total_duration,
+                outpoints=outpoints,
+                encoder=self.encoder, bitrate=self.bitrate, gop=self.gop,
+                progress=lambda secs, tot: self.progress.emit(secs, tot),
+                cancel=self.isInterruptionRequested,
+            )
+        except Exception:
+            logging.getLogger("clipper").exception("join worker crashed")
+            result = ConcatResult(False, Path(self.out_path), [], stderr="internal error — see log")
         self.finishedResult.emit(result)
 
 
@@ -305,6 +321,82 @@ class MarkerWindow(QMainWindow):
         if initial_video:
             self.load_video(initial_video)
         self._focus_video()
+
+        # After the window is up, offer to resume any background jobs left over
+        # from a previous session that ended before finishing (crash or quit).
+        self._pending_resume = session.load_jobs()
+        if self._pending_resume:
+            QTimer.singleShot(0, self._offer_resume)
+
+    def _offer_resume(self):
+        jobs = getattr(self, "_pending_resume", [])
+        self._pending_resume = []
+        if not jobs:
+            return
+        n = len(jobs)
+        labels = "\n".join(f"   • {kind}: {job.get('label', '?')}" for kind, job in jobs[:8])
+        more = f"\n   … and {n - 8} more" if n > 8 else ""
+        keep = QMessageBox.question(
+            self, "Resume unfinished jobs",
+            f"{n} background job(s) from your last session didn't finish "
+            "(the app may have closed unexpectedly):\n\n" + labels + more +
+            "\n\nResume them now? (Choosing No discards the list — the source "
+            "files are untouched.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        ) == QMessageBox.StandardButton.Yes
+        if not keep:
+            session.clear()
+            log.info("user discarded %d resumable job(s)", n)
+            return
+        try:
+            self._ffmpeg = self._ffmpeg or find_ffmpeg()
+        except FFmpegNotFound as exc:
+            QMessageBox.critical(self, "Resume jobs", str(exc))
+            return
+        for kind, job in jobs:
+            (self._join_queue if kind == "join" else self._export_queue).append(job)
+        log.info("resuming %d job(s) from the previous session", n)
+        self.statusBar().showMessage(f"Resuming {n} unfinished background job(s)…", 8000)
+        self._pump()
+
+    def _on_unhandled(self, exc_type, exc, tb):
+        """Top-level exception already logged by the excepthook -- tell the user
+        non-fatally and keep running. Guarded so the notice can't itself crash."""
+        try:
+            name = getattr(exc_type, "__name__", "Error")
+            self.statusBar().showMessage(
+                f"Something went wrong ({name}) — it's been logged; the app is still running. "
+                "If it recurs, send the log from Help ▸ about the log location.", 15000)
+        except Exception:
+            pass
+
+    def closeEvent(self, event):
+        """On quit, if background jobs are still running/queued, confirm and save
+        them for resume (and stop the worker so ffmpeg isn't left orphaned)."""
+        running = (self._export_worker is not None) or (self._join_worker is not None)
+        pending = len(self._export_queue) + len(self._join_queue)
+        if running or pending:
+            n = pending + (1 if running else 0)
+            keep = QMessageBox.question(
+                self, "Background jobs still running",
+                f"{n} background job(s) are still encoding or queued. Quit anyway?\n\n"
+                "They’ll resume automatically the next time you open the app.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            ) == QMessageBox.StandardButton.Yes
+            if not keep:
+                event.ignore()
+                return
+            self._persist_queues()            # capture running + queued for resume
+            for w in (self._export_worker, self._join_worker):
+                if w:
+                    w.requestInterruption()
+                    w.wait(3000)
+            log.info("quit with %d unfinished job(s); saved for resume", n)
+        else:
+            session.clear()                   # clean exit -> nothing to resume
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ UI
 
@@ -1562,10 +1654,25 @@ class MarkerWindow(QMainWindow):
             self._start_next_join()
         else:
             self._flush_summaries()
+        self._persist_queues()
+
+    def _persist_queues(self):
+        """Snapshot unfinished jobs (the running one + everything queued) to disk so
+        a crash or accidental quit can resume the batch on next launch."""
+        jobs = []
+        if self._export_worker is not None and self._current_job is not None:
+            jobs.append(self._current_job)
+        if self._join_worker is not None and self._current_join is not None:
+            jobs.append(self._current_join)
+        jobs.extend(self._export_queue)
+        jobs.extend(self._join_queue)
+        session.save_jobs(jobs)
 
     def _start_next_export(self):
         job = self._current_job = self._export_queue.pop(0)
         total = len(job["rows"])
+        log.info("export start: '%s' (%d clips, %s) -> %s",
+                 job["label"], total, job["video_mode"], job["out_dir"])
         self.export_bar.setRange(0, total)
         self.export_bar.setValue(0)
         self.export_cancel_btn.setEnabled(True)
@@ -1607,6 +1714,7 @@ class MarkerWindow(QMainWindow):
         self._export_worker = None
         self._export_results.append((job, result))
         written = len(result.written)
+        log.info("export done: '%s' %d/%d clips", job["label"], written, result.total)
         self.statusBar().showMessage(f"✓ “{job['label']}”: {written}/{result.total} clips exported", 8000)
         self._pump()                # next job, or the batch summary if the queue is empty
 
@@ -1643,6 +1751,8 @@ class MarkerWindow(QMainWindow):
 
     def _start_next_join(self):
         job = self._current_join = self._join_queue.pop(0)
+        log.info("join start: '%s' (%s) -> %s", job["label"],
+                 "encode" if job.get("bitrate") else "copy", job["out_path"])
         self.export_bar.setRange(0, 0)      # busy until progress arrives
         self.export_cancel_btn.setEnabled(True)
         self.export_progress_row.setVisible(True)
@@ -1685,11 +1795,14 @@ class MarkerWindow(QMainWindow):
         self._join_worker = None
         self._join_results.append((job, result))
         if result.cancelled:
+            log.info("join cancelled: '%s'", job["label"])
             self.statusBar().showMessage(f"Join “{job['label']}” cancelled.", 5000)
         elif result.ok:
+            log.info("join done: '%s' -> %s", job["label"], Path(result.output).name)
             self.statusBar().showMessage(f"✓ Joined “{job['label']}” → {Path(result.output).name}", 8000)
         else:
             tail = result.stderr.splitlines()[-1] if result.stderr else f"ffmpeg exit {result.returncode}"
+            log.error("join FAILED: '%s': %s", job["label"], tail)
             self.statusBar().showMessage(f"Join “{job['label']}” failed: {tail}", 9000)
         self._pump()
 
@@ -1937,6 +2050,8 @@ def main(argv=None) -> int:
     _prepare_bundled_ffmpeg()
     if "--selftest" in argv:
         return _selftest(argv)
+    logfile = applog.setup_logging(APP_VERSION)
+    applog.install_qt_message_handler()
     initial = None
     for a in argv[1:]:
         if not a.startswith("-") and Path(a).exists():
@@ -1944,6 +2059,8 @@ def main(argv=None) -> int:
             break
     app = QApplication(argv)
     win = MarkerWindow(initial)
+    applog.install_excepthook(win._on_unhandled)
+    log.info("UI ready (log: %s)", logfile)
     win.show()
     return app.exec()
 

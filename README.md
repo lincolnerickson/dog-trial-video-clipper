@@ -268,6 +268,33 @@ scans the tail of each file, finds exactly where the black starts (ffmpeg's
 no real footage lost. It adds only a quick scan of each file's last few seconds,
 and is harmless for cameras that don't do this (a clean file is left alone).
 
+### Background queue, logs & crash recovery
+
+Exports and joins run in a **single background queue** (one job at a time). If the
+app **crashes or is quit** while jobs are running or queued, they are **not lost**:
+
+- The unfinished jobs (the running one + everything queued) are saved to
+  `queue.json` in the app-data folder. On the **next launch** the app asks
+  *"Resume unfinished jobs?"* — Yes re-queues and continues the batch; No discards
+  the list (your source files are never touched). A job that was mid-encode simply
+  re-encodes from scratch.
+- **Quitting** with jobs still going asks for confirmation and saves them for
+  resume (and stops ffmpeg cleanly rather than leaving it orphaned).
+- Every run writes a rotating **log** you can send if something goes wrong, and an
+  unexpected error is logged with a full traceback instead of silently closing the
+  app (a brief status-bar notice appears and the app keeps running where possible).
+
+Locations:
+
+| | Log | App data (`queue.json`) |
+|---|---|---|
+| **macOS** | `~/Library/Logs/DogTrialVideoClipper/clipper.log` | `~/Library/Application Support/DogTrialVideoClipper/` |
+| **Windows** | `%LOCALAPPDATA%\DogTrialVideoClipper\logs\clipper.log` | `%LOCALAPPDATA%\DogTrialVideoClipper\` |
+
+If the app ever hard-crashes (a native crash, not a Python error), macOS also
+writes a report under `~/Library/Logs/DiagnosticReports/` (look for
+`Dog Trial Video Clipper-*.ips`) — that plus `clipper.log` pinpoints the cause.
+
 ### Hotkeys
 
 | Key | Action |
@@ -437,6 +464,7 @@ tests/
   test_run_order.py      running order saved from view 1 drives Enter in later views  (offscreen)
   test_undo.py           undo reverses the last action (one gesture = one step)  (offscreen)
   test_scrub.py          scrub seeks coalesce to the latest target (smooth scrubbing)  (offscreen)
+  test_session.py        background job queue persists + restores across a restart  (python tests/test_session.py)
   diagnose_video.py      report a file's codec/frames if video won't show
   render_check.py        confirm frames are painted to the canvas
 sample/                  generated 4K test video + sample roster/clip CSVs (safe to delete)
