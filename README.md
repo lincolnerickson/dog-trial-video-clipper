@@ -92,9 +92,13 @@ Launch it:
 5. Reorder, edit, or delete rows any time before export.
 6. **Export CSV…** to save the clip list, and/or **Export clips…** to cut the
    clips right now. Export asks whether to **group into a folder per participant**
-   (handler + dog) — see below. Cutting runs **in the background** (a progress bar
-   appears under the clip list with a Cancel button), so you can **keep marking
-   the next camera view while the current one exports.**
+   (handler + dog) — see below. Cutting runs **in the background** in a **queue**:
+   each **Export clips…** adds a job (with its own source video + clip list), and
+   they cut one after another while you work. Hitting Export also **clears the
+   window** (clips, marks, search; the roster is restored) so you can immediately
+   **open and mark the next camera view.** A progress bar under the clip list shows
+   the current job and how many are queued, with a Cancel button; a summary
+   appears when the whole queue finishes.
 
 You can also type a name directly into the *Participant* field for anyone not in
 the roster (ad-hoc entries don't consume a roster name).

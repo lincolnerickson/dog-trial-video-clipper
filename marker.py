@@ -259,7 +259,11 @@ class MarkerWindow(QMainWindow):
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
         self._progress: QProgressDialog | None = None
-        self._autosaved_csv: Path | None = None  # clip list saved beside the last export
+        # Export queue: each click adds a job (its own source video + clip
+        # snapshot + settings); jobs run one at a time in the background.
+        self._export_queue: list[dict] = []
+        self._export_results: list = []          # completed jobs, for the batch summary
+        self._current_job: dict | None = None
         # Optional cards added to every exported clip: intro (prepended), outro
         # (appended, e.g. a bullseye map of where the hides were).
         self.intro_image: str | None = None
@@ -1549,70 +1553,129 @@ class MarkerWindow(QMainWindow):
 
         rows = self._effective_clips()
         # Save the clip list beside the videos so it can be reloaded to fix a clip.
-        self._autosaved_csv = self._autosave_clip_list(out_dir, rows)
+        csv_path = self._autosave_clip_list(out_dir, rows)
 
-        # Non-modal inline progress: the cut runs in the background (thread + the
-        # Mac's hardware encoder), so she can keep marking the next view meanwhile.
-        self.export_bar.setRange(0, len(rows))
+        # Queue a job that captures its OWN source video + clip snapshot + settings,
+        # so she can immediately load and mark the next view while this one cuts.
+        job = {
+            "video": self.video_path, "rows": rows, "out_dir": out_dir,
+            "folder_per_participant": folder_per_participant,
+            "intro": intro, "outro": outro, "video_mode": video_mode, "bitrate": bitrate,
+            "label": self.search_edit.text().strip() or Path(out_dir).name or "clips",
+            "csv": csv_path,
+        }
+        self._export_queue.append(job)
+        pending = len(self._export_queue) + (1 if self._export_worker else 0)
+        self.statusBar().showMessage(
+            f"Queued “{job['label']}” for export ({pending} in the queue) — "
+            "window cleared for your next view.", 8000,
+        )
+        self._pump_queue()          # start it now if nothing is running
+        self._reset_for_next()      # blank the window for the next camera view
+
+    def _pump_queue(self):
+        """Start the next queued export, or (when the queue drains) show the
+        summary. Only one job cuts at a time -- called again when each finishes."""
+        if self._export_worker is not None:
+            return                                  # busy; resumes on completion
+        if not self._export_queue:
+            if self._export_results:                # everything finished
+                self.export_progress_row.setVisible(False)
+                self._current_job = None
+                self._show_export_summary(self._export_results)
+                self._export_results = []
+            return
+        job = self._current_job = self._export_queue.pop(0)
+        total = len(job["rows"])
+        self.export_bar.setRange(0, total)
         self.export_bar.setValue(0)
-        self.export_status.setText(f"Exporting 0/{len(rows)}…")
         self.export_cancel_btn.setEnabled(True)
         self.export_progress_row.setVisible(True)
-        self.export_clips_btn.setEnabled(False)
-        self.statusBar().showMessage(
-            f"Exporting {len(rows)} clips in the background — keep marking; "
-            "you'll get a notice when it's done.", 6000,
-        )
-
+        self._update_export_status(0, total)
         self._export_worker = ExportWorker(
-            self._ffmpeg, self.video_path, rows, out_dir, folder_per_participant,
-            intro=intro, outro=outro, video_mode=video_mode, bitrate=bitrate,
+            self._ffmpeg, job["video"], job["rows"], job["out_dir"], job["folder_per_participant"],
+            intro=job["intro"], outro=job["outro"], video_mode=job["video_mode"], bitrate=job["bitrate"],
         )
         self._export_worker.rowDone.connect(self._on_export_row)
-        self._export_worker.finishedResult.connect(lambda res: self._on_export_done(res, out_dir))
+        self._export_worker.finishedResult.connect(lambda res, j=job: self._on_export_done(res, j))
         self._export_worker.start()
-        self._focus_video()   # hand focus back so the marking hotkeys work right away
+
+    def _update_export_status(self, done: int, total: int):
+        label = self._current_job["label"] if self._current_job else ""
+        waiting = len(self._export_queue)
+        tail = f"   ·   {waiting} more queued" if waiting else ""
+        self.export_status.setText(f"Exporting “{label}”  {done}/{total}{tail}")
 
     def _cancel_export(self):
+        """Cancel the running job and drop everything still queued."""
+        dropped = len(self._export_queue)
+        self._export_queue.clear()
         if self._export_worker:
             self._export_worker.requestInterruption()
             self.export_cancel_btn.setEnabled(False)
             self.export_status.setText("Cancelling…")
+        if dropped:
+            self.statusBar().showMessage(f"Cancelled — dropped {dropped} queued export(s).", 5000)
 
     def _on_export_row(self, rownum: int, total: int, outcome):
         self.export_bar.setRange(0, total)
         self.export_bar.setValue(rownum)
-        self.export_status.setText(f"Exporting {rownum}/{total}…")
+        self._update_export_status(rownum, total)
 
-    def _on_export_done(self, result, out_dir: str):
-        self.export_progress_row.setVisible(False)
-        self.export_clips_btn.setEnabled(True)
+    def _on_export_done(self, result, job):
         self._export_worker = None
+        self._export_results.append((job, result))
         written = len(result.written)
-        self.statusBar().showMessage(f"✓ Exported {written}/{result.total} clips to {out_dir}", 12000)
-        lines = [f"Wrote {written}/{result.total} clips in {result.elapsed:.1f}s into:\n{out_dir}"]
-        if getattr(self, "_autosaved_csv", None):
-            lines.append(f"\nClip list saved as “{self._autosaved_csv.name}” — "
-                         "use Load clip CSV… to reopen and tweak a clip later.")
-        if result.problems:
-            lines.append("\nSkipped / failed:")
-            lines += [f"  • row {o.rownum} {o.label}: {o.reason}" for o in result.problems]
-        # Non-modal completion: a floating notice she can act on or ignore -- it
-        # never blocks marking. Focus is handed straight back to the video.
+        self.statusBar().showMessage(f"✓ “{job['label']}”: {written}/{result.total} clips exported", 8000)
+        self._pump_queue()          # next job, or the batch summary if the queue is empty
+
+    def _show_export_summary(self, results):
+        total_clips = sum(len(r.written) for _, r in results)
+        any_problems = any(r.problems for _, r in results)
+        lines = []
+        for job, r in results:
+            mark = "" if not r.problems else f"   ({len(r.problems)} skipped/failed)"
+            lines.append(f"• {job['label']}: {len(r.written)}/{r.total} → {Path(job['out_dir']).name}{mark}")
+        last_dir = results[-1][0]["out_dir"] if results else None
         box = QMessageBox(self)
-        box.setWindowTitle("Export complete")
-        box.setIcon(QMessageBox.Icon.Information if not result.problems else QMessageBox.Icon.Warning)
-        box.setText("\n".join(lines))
-        open_btn = box.addButton("Open folder", QMessageBox.ButtonRole.AcceptRole)
+        box.setWindowTitle("Exports complete")
+        box.setIcon(QMessageBox.Icon.Warning if any_problems else QMessageBox.Icon.Information)
+        plural = "export" if len(results) == 1 else "exports"
+        box.setText(f"Finished {len(results)} {plural}, {total_clips} clips total:\n\n" + "\n".join(lines))
+        if any_problems:
+            details = [f"[{job['label']}] row {o.rownum} {o.label}: {o.reason}"
+                       for job, r in results for o in r.problems]
+            box.setDetailedText("\n".join(details))
+        open_btn = box.addButton("Open last folder", QMessageBox.ButtonRole.AcceptRole)
         box.addButton(QMessageBox.StandardButton.Close)
         box.setModal(False)
         box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         box.buttonClicked.connect(
-            lambda b: QDesktopServices.openUrl(QUrl.fromLocalFile(out_dir)) if b is open_btn else None
+            lambda b: QDesktopServices.openUrl(QUrl.fromLocalFile(last_dir)) if (b is open_btn and last_dir) else None
         )
         self._export_done_box = box
         box.show()
         self.activateWindow()
+        self._focus_video()
+
+    def _reset_for_next(self):
+        """Blank the marking state after an export is queued, so she can load and
+        mark the next camera view. The job kept its own snapshot (and the clip list
+        was auto-saved to CSV), so nothing is lost. The source video stays loaded;
+        the running order (if any) is kept for reuse."""
+        self.clips = []
+        self.in_point = self.out_point = None
+        self.editing_row = None
+        self.exact_check.setChecked(False)
+        self.label_edit.clear()
+        self.search_edit.clear()
+        self.add_btn.setText("Add clip")
+        self._available = list(self._roster_all)   # same participants run again next view
+        self._undo_stack.clear()
+        self._update_undo_ui()
+        self._refresh_table()
+        self._refresh_roster()
+        self._update_marks_ui()
         self._focus_video()
 
     def _confirm_problems(self, summary: str, action: str) -> bool:
