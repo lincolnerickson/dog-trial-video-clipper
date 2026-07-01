@@ -861,24 +861,29 @@ def concat_videos(
     *,
     total_duration: float | None = None,
     outpoints: Sequence[float | None] | None = None,
+    encoder: str | None = None,
+    bitrate: int = 0,
+    gop: int = 0,
     progress: Callable[[float, float | None], None] | None = None,
     cancel: Callable[[], bool] | None = None,
     dry_run: bool = False,
 ) -> ConcatResult:
-    """Join ``inputs`` into one file by stream copy (no re-encode).
+    """Join ``inputs`` into one file.
 
-    Uses ffmpeg's concat *demuxer*, which is lossless and fast and correct when
-    every input shares the same codec/resolution/framerate -- exactly the case
-    for the ~hour-long chapters a GoPro auto-splits one long recording into.
+    Uses ffmpeg's concat *demuxer*, correct when every input shares the same
+    codec/resolution/framerate -- the ~hour-long chapters a GoPro/DJI auto-splits.
+
+    By default this is a lossless **stream copy** (fast). If ``bitrate`` (kbps) +
+    ``encoder`` are given it instead **re-encodes** the whole join to HEVC at that
+    target bitrate with a short GOP (``gop`` frames, for accurate later stream-copy
+    cuts) -- so clips cut from the result need no encoding. This is slower (it's a
+    full encode) and meant to run in a background queue.
 
     ``outpoints`` (one per input, any may be None) trims each file's tail at the
-    given timestamp via the concat demuxer -- used to drop trailing black frames
-    while still stream-copying (see :func:`detect_trailing_black`).
-
-    ``progress(seconds_done, total_duration)`` is called as ffmpeg reports it
-    (``total_duration`` may be None if unknown). ``cancel`` is polled between
-    progress updates; when it returns True the join stops and the partial output
-    is removed. Never raises on ffmpeg failure -- returns a :class:`ConcatResult`.
+    given timestamp -- used to drop trailing black frames (see
+    :func:`detect_trailing_black`). ``progress(seconds_done, total_duration)`` is
+    called as ffmpeg reports it; ``cancel`` is polled and stops the job, removing
+    the partial output. Never raises on ffmpeg failure -- returns a ConcatResult.
     """
     out_path = Path(out_path)
     inputs = [Path(p) for p in inputs]
@@ -886,11 +891,18 @@ def concat_videos(
     list_fd, list_path = tempfile.mkstemp(prefix="clipper_concat_", suffix=".txt")
     err_fd, err_path = tempfile.mkstemp(prefix="clipper_concat_", suffix=".log")
     os.close(err_fd)
+    if bitrate and encoder:
+        codec_args = ["-c:v", encoder] + bitrate_args(encoder, bitrate) + ["-tag:v", "hvc1"]
+        if gop:
+            codec_args += ["-g", str(gop)]
+        codec_args += ["-c:a", "aac", "-movflags", "+faststart"]
+    else:
+        codec_args = ["-c", "copy"]
     cmd = [
         ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
         "-f", "concat", "-safe", "0", "-i", list_path,
         "-map", "0:v:0", "-map", "0:a?",   # video + audio; drop GoPro data tracks
-        "-c", "copy",
+        *codec_args,
         "-progress", "pipe:1", "-nostats",
         str(out_path),
     ]

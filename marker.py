@@ -49,7 +49,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
-    QProgressDialog,
     QPushButton,
     QSlider,
     QSpinBox,
@@ -69,6 +68,7 @@ from clipper.ffmpeg_tools import (
     concat_videos,
     detect_trailing_black,
     find_ffmpeg,
+    find_hevc_encoder,
     probe_duration,
 )
 from markerlib import roster
@@ -208,13 +208,17 @@ class JoinWorker(QThread):
     analyzing = Signal(int, int, str)  # index, count, filename (black-frame scan)
     finishedResult = Signal(object)    # ConcatResult
 
-    def __init__(self, ffmpeg, inputs, out_path, total_duration, trim_black=False):
+    def __init__(self, ffmpeg, inputs, out_path, total_duration, trim_black=False,
+                 encoder=None, bitrate=0, gop=0):
         super().__init__()
         self.ffmpeg = ffmpeg
         self.inputs = inputs
         self.out_path = out_path
         self.total_duration = total_duration
         self.trim_black = trim_black
+        self.encoder = encoder
+        self.bitrate = bitrate
+        self.gop = gop
 
     def run(self):
         outpoints = None
@@ -233,6 +237,7 @@ class JoinWorker(QThread):
             self.ffmpeg, self.inputs, self.out_path,
             total_duration=self.total_duration,
             outpoints=outpoints,
+            encoder=self.encoder, bitrate=self.bitrate, gop=self.gop,
             progress=lambda secs, tot: self.progress.emit(secs, tot),
             cancel=self.isInterruptionRequested,
         )
@@ -258,12 +263,16 @@ class MarkerWindow(QMainWindow):
         self._ffmpeg: str | None = None
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
-        self._progress: QProgressDialog | None = None
-        # Export queue: each click adds a job (its own source video + clip
-        # snapshot + settings); jobs run one at a time in the background.
+        # Background job queues: exports (each captures its own source video +
+        # clip snapshot) and joins (encode a whole recording overnight). Only one
+        # heavy job runs at a time -- see _pump(); joins and exports never fight.
         self._export_queue: list[dict] = []
         self._export_results: list = []          # completed jobs, for the batch summary
         self._current_job: dict | None = None
+        self._join_queue: list[dict] = []
+        self._join_results: list = []
+        self._current_join: dict | None = None
+        self._hevc_encoder: str | None = None    # cached fastest HEVC encoder
         # Optional cards added to every exported clip: intro (prepended), outro
         # (appended, e.g. a bullseye map of where the hides were).
         self.intro_image: str | None = None
@@ -479,8 +488,8 @@ class MarkerWindow(QMainWindow):
         self.bitrate_label = QLabel("Bitrate")
         fmt_row.addWidget(self.bitrate_label)
         self.bitrate_spin = QDoubleSpinBox()
-        self.bitrate_spin.setRange(2.0, 40.0)
-        self.bitrate_spin.setValue(12.0)
+        self.bitrate_spin.setRange(2.0, 60.0)
+        self.bitrate_spin.setValue(30.0)
         self.bitrate_spin.setSingleStep(1.0)
         self.bitrate_spin.setDecimals(1)
         self.bitrate_spin.setSuffix(" Mbps")
@@ -524,7 +533,7 @@ class MarkerWindow(QMainWindow):
         self.export_bar.setTextVisible(False)
         self.export_status = QLabel("")
         self.export_status.setStyleSheet("color: #888;")
-        self.export_cancel_btn = self._btn("Cancel", self._cancel_export, focusable=True)
+        self.export_cancel_btn = self._btn("Cancel", self._cancel_background, focusable=True)
         pr.addWidget(self.export_bar, stretch=1)
         pr.addWidget(self.export_status)
         pr.addWidget(self.export_cancel_btn)
@@ -767,62 +776,65 @@ class MarkerWindow(QMainWindow):
     # --------------------------------------------------- join GoPro chapters
 
     def join_videos_dialog(self):
-        """Join several GoPro chapters into one file, then load it for marking."""
+        """Join a recording's chapters into one file, optionally re-encoding it to
+        delivery quality (HEVC at the export bitrate) so later clips need no
+        encoding. Jobs run in a background queue — add several and let them run
+        overnight; results do NOT auto-load (open one to mark when ready)."""
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select the GoPro chapters to join (one recording)", "", VIDEO_FILTER
+            self, "Select the chapters of one recording", "", VIDEO_FILTER
         )
         if not paths:
             return
         paths = sorted(paths, key=lambda p: _natural_key(Path(p).name))
-        if len(paths) == 1:
-            self.load_video(paths[0])  # nothing to join — just open it
-            return
-
-        order = "\n".join(f"   {i + 1}.  {Path(p).name}" for i, p in enumerate(paths))
-        box = QMessageBox(self)
-        box.setWindowTitle("Join videos")
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setText(
-            f"Join these {len(paths)} videos into one, in this order?\n\n{order}\n\n"
-            "They’ll be stream-copied (no re-encode, no quality loss). Pick a "
-            "save location next."
-        )
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        box.setDefaultButton(QMessageBox.StandardButton.Yes)
-        trim_cb = QCheckBox("Trim trailing black frames at each join (recommended for DJI)")
-        trim_cb.setChecked(True)
-        trim_cb.setToolTip(
-            "Some cameras (DJI) end each auto-split file with a few black frames,\n"
-            "which become a brief black flash at every join. This scans each file's\n"
-            "tail and trims the black — still a lossless stream copy, no footage lost."
-        )
-        box.setCheckBox(trim_cb)
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-        trim_black = trim_cb.isChecked()
-
         try:
             self._ffmpeg = self._ffmpeg or find_ffmpeg()
         except FFmpegNotFound as exc:
             QMessageBox.critical(self, "Join videos", str(exc))
             return
 
+        n = len(paths)
+        mbps = self.bitrate_spin.value()
+        box = QMessageBox(self)
+        box.setWindowTitle("Join / prepare recording")
+        box.setIcon(QMessageBox.Icon.Question)
+        if n > 1:
+            order = "\n".join(f"   {i + 1}.  {Path(p).name}" for i, p in enumerate(paths))
+            box.setText(f"Join these {n} chapters into one recording, in order?\n\n{order}\n\n"
+                        "Pick a save location next.")
+        else:
+            box.setText(f"Prepare “{Path(paths[0]).name}” for marking?\n\nPick a save location next.")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        encode_cb = QCheckBox(
+            f"Encode to delivery quality now (HEVC ~{mbps:g} Mbps) so clips export instantly later")
+        encode_cb.setChecked(True)
+        encode_cb.setToolTip(
+            "Re-encode the whole recording to your delivery bitrate now — this is\n"
+            "queued and can run overnight. Then clips cut from it are an instant\n"
+            "stream copy (no per-clip encoding). Uncheck for a fast lossless join.\n"
+            "Trailing black frames (DJI) are trimmed either way."
+        )
+        box.setCheckBox(encode_cb)
+        if box.exec() != QMessageBox.StandardButton.Yes:
+            return
+        encode = encode_cb.isChecked()
+
+        if n == 1 and not encode:
+            self.load_video(paths[0])   # nothing to join or encode — just open it
+            return
+
         first = Path(paths[0])
-        default_out = str(first.with_name(f"{first.stem}_joined.mp4"))
+        default_out = str(first.with_name(f"{first.stem}{'_delivery' if encode else '_joined'}.mp4"))
         out_path, _ = QFileDialog.getSaveFileName(
-            self, "Save joined video as", default_out, "MP4 video (*.mp4)"
+            self, "Save prepared video as", default_out, "MP4 video (*.mp4)"
         )
         if not out_path:
             return
-        out_resolved = Path(out_path).resolve()
-        if any(out_resolved == Path(p).resolve() for p in paths):
-            QMessageBox.warning(
-                self, "Join videos",
-                "The output file can’t be one of the input videos. Pick a different name.",
-            )
+        if any(Path(out_path).resolve() == Path(p).resolve() for p in paths):
+            QMessageBox.warning(self, "Join videos",
+                                "The output can’t be one of the input videos. Pick a different name.")
             return
 
-        # Sum the chapter durations for a real progress bar (best-effort).
         total: float | None = 0.0
         for p in paths:
             d = probe_duration(self._ffmpeg, p)
@@ -831,59 +843,24 @@ class MarkerWindow(QMainWindow):
                 break
             total += d
 
-        self._progress = QProgressDialog("Joining videos…", "Cancel", 0, 1000, self)
-        self._progress.setWindowTitle("Join videos")
-        self._progress.setWindowModality(Qt.WindowModality.WindowModal)
-        self._progress.setMinimumDuration(0)
-        if not total:
-            self._progress.setRange(0, 0)  # unknown length -> busy indicator
-        self._progress.setValue(0)
-
-        self._join_worker = JoinWorker(self._ffmpeg, paths, out_path, total, trim_black=trim_black)
-        self._join_worker.progress.connect(self._on_join_progress)
-        self._join_worker.analyzing.connect(self._on_join_analyzing)
-        self._join_worker.finishedResult.connect(
-            lambda res: self._on_join_done(res, len(paths))
-        )
-        self._progress.canceled.connect(self._join_worker.requestInterruption)
-        self._join_worker.start()
-
-    def _on_join_analyzing(self, index: int, count: int, name: str):
-        if not self._progress:
-            return
-        self._progress.setRange(0, 0)  # busy spinner while scanning tails
-        self._progress.setLabelText(f"Checking for black frames ({index}/{count}): {name}")
-
-    def _on_join_progress(self, seconds: float, total):
-        if not self._progress:
-            return
-        if total:
-            if self._progress.maximum() == 0:
-                self._progress.setRange(0, 1000)  # leave the busy spinner from the scan
-            self._progress.setValue(int(min(seconds / total, 1.0) * 1000))
-            self._progress.setLabelText(
-                f"Joining… {timecode.format_timecode(seconds)} / "
-                f"{timecode.format_timecode(total)}"
-            )
+        if encode:
+            self._hevc_encoder = self._hevc_encoder or find_hevc_encoder(self._ffmpeg)
+            encoder, bitrate, gop = self._hevc_encoder, int(mbps * 1000), 60  # ~1s keyframes
         else:
-            self._progress.setLabelText(f"Joining… {timecode.format_timecode(seconds)}")
+            encoder, bitrate, gop = None, 0, 0
 
-    def _on_join_done(self, result, n_inputs: int):
-        if self._progress:
-            self._progress.close()
-            self._progress = None
-        self._join_worker = None
-        if result.cancelled:
-            self.statusBar().showMessage("Join cancelled — no file written.", 5000)
-            return
-        if not result.ok:
-            tail = result.stderr.splitlines()[-1] if result.stderr else f"ffmpeg exit {result.returncode}"
-            QMessageBox.critical(self, "Join videos", f"Could not join the videos:\n{tail}")
-            return
+        self._join_queue.append({
+            "inputs": paths, "out_path": out_path, "total": total,
+            "trim_black": True, "encoder": encoder, "bitrate": bitrate, "gop": gop,
+            "label": Path(out_path).stem,
+        })
+        pending = len(self._join_queue) + len(self._export_queue) + (
+            1 if (self._join_worker or self._export_worker) else 0)
         self.statusBar().showMessage(
-            f"Joined {n_inputs} videos → {Path(result.output).name}. Now mark away.", 8000
+            f"Queued “{Path(out_path).stem}” ({'encode' if encode else 'join'}) — "
+            f"{pending} in the background queue. Add more and let them run.", 9000,
         )
-        self.load_video(str(result.output))
+        self._pump()
 
     # ------------------------------------------------------------- roster
 
@@ -1570,21 +1547,23 @@ class MarkerWindow(QMainWindow):
             f"Queued “{job['label']}” for export ({pending} in the queue) — "
             "window cleared for your next view.", 8000,
         )
-        self._pump_queue()          # start it now if nothing is running
+        self._pump()                # start it now if nothing is running
         self._reset_for_next()      # blank the window for the next camera view
 
-    def _pump_queue(self):
-        """Start the next queued export, or (when the queue drains) show the
-        summary. Only one job cuts at a time -- called again when each finishes."""
-        if self._export_worker is not None:
-            return                                  # busy; resumes on completion
-        if not self._export_queue:
-            if self._export_results:                # everything finished
-                self.export_progress_row.setVisible(False)
-                self._current_job = None
-                self._show_export_summary(self._export_results)
-                self._export_results = []
+    def _pump(self):
+        """Run one background job at a time. Exports (interactive) go first, then
+        queued joins; when everything drains, show the summaries. Called whenever a
+        job is queued or one finishes -- so joins and exports never fight."""
+        if self._export_worker is not None or self._join_worker is not None:
             return
+        if self._export_queue:
+            self._start_next_export()
+        elif self._join_queue:
+            self._start_next_join()
+        else:
+            self._flush_summaries()
+
+    def _start_next_export(self):
         job = self._current_job = self._export_queue.pop(0)
         total = len(job["rows"])
         self.export_bar.setRange(0, total)
@@ -1602,20 +1581,22 @@ class MarkerWindow(QMainWindow):
 
     def _update_export_status(self, done: int, total: int):
         label = self._current_job["label"] if self._current_job else ""
-        waiting = len(self._export_queue)
+        waiting = len(self._export_queue) + len(self._join_queue)
         tail = f"   ·   {waiting} more queued" if waiting else ""
         self.export_status.setText(f"Exporting “{label}”  {done}/{total}{tail}")
 
-    def _cancel_export(self):
-        """Cancel the running job and drop everything still queued."""
-        dropped = len(self._export_queue)
+    def _cancel_background(self):
+        """Cancel the running job (export or join) and drop everything queued."""
+        dropped = len(self._export_queue) + len(self._join_queue)
         self._export_queue.clear()
-        if self._export_worker:
-            self._export_worker.requestInterruption()
-            self.export_cancel_btn.setEnabled(False)
-            self.export_status.setText("Cancelling…")
+        self._join_queue.clear()
+        for worker in (self._export_worker, self._join_worker):
+            if worker:
+                worker.requestInterruption()
+        self.export_cancel_btn.setEnabled(False)
+        self.export_status.setText("Cancelling…")
         if dropped:
-            self.statusBar().showMessage(f"Cancelled — dropped {dropped} queued export(s).", 5000)
+            self.statusBar().showMessage(f"Cancelled — dropped {dropped} queued job(s).", 5000)
 
     def _on_export_row(self, rownum: int, total: int, outcome):
         self.export_bar.setRange(0, total)
@@ -1627,7 +1608,7 @@ class MarkerWindow(QMainWindow):
         self._export_results.append((job, result))
         written = len(result.written)
         self.statusBar().showMessage(f"✓ “{job['label']}”: {written}/{result.total} clips exported", 8000)
-        self._pump_queue()          # next job, or the batch summary if the queue is empty
+        self._pump()                # next job, or the batch summary if the queue is empty
 
     def _show_export_summary(self, results):
         total_clips = sum(len(r.written) for _, r in results)
@@ -1657,6 +1638,101 @@ class MarkerWindow(QMainWindow):
         box.show()
         self.activateWindow()
         self._focus_video()
+
+    # ----------------------------------------------------- join queue
+
+    def _start_next_join(self):
+        job = self._current_join = self._join_queue.pop(0)
+        self.export_bar.setRange(0, 0)      # busy until progress arrives
+        self.export_cancel_btn.setEnabled(True)
+        self.export_progress_row.setVisible(True)
+        self._update_join_status(0.0, job.get("total"))
+        self._join_worker = JoinWorker(
+            self._ffmpeg, job["inputs"], job["out_path"], job.get("total"),
+            trim_black=job["trim_black"], encoder=job["encoder"],
+            bitrate=job["bitrate"], gop=job["gop"],
+        )
+        self._join_worker.progress.connect(self._on_join_progress)
+        self._join_worker.analyzing.connect(self._on_join_analyzing)
+        self._join_worker.finishedResult.connect(lambda res, j=job: self._on_join_done(res, j))
+        self._join_worker.start()
+
+    def _update_join_status(self, secs, total):
+        label = self._current_join["label"] if self._current_join else ""
+        waiting = len(self._join_queue) + len(self._export_queue)
+        tail = f"   ·   {waiting} more queued" if waiting else ""
+        verb = "Encoding" if (self._current_join and self._current_join.get("bitrate")) else "Joining"
+        if total:
+            self.export_status.setText(
+                f"{verb} “{label}”  {timecode.format_timecode(secs)} / "
+                f"{timecode.format_timecode(total)}{tail}")
+        else:
+            self.export_status.setText(f"{verb} “{label}”  {timecode.format_timecode(secs)}{tail}")
+
+    def _on_join_analyzing(self, index: int, count: int, name: str):
+        self.export_bar.setRange(0, 0)
+        self.export_status.setText(f"Checking for black frames ({index}/{count}): {name}")
+
+    def _on_join_progress(self, seconds, total):
+        if total:
+            self.export_bar.setRange(0, 1000)
+            self.export_bar.setValue(int(min(seconds / total, 1.0) * 1000))
+        else:
+            self.export_bar.setRange(0, 0)
+        self._update_join_status(seconds, total)
+
+    def _on_join_done(self, result, job):
+        self._join_worker = None
+        self._join_results.append((job, result))
+        if result.cancelled:
+            self.statusBar().showMessage(f"Join “{job['label']}” cancelled.", 5000)
+        elif result.ok:
+            self.statusBar().showMessage(f"✓ Joined “{job['label']}” → {Path(result.output).name}", 8000)
+        else:
+            tail = result.stderr.splitlines()[-1] if result.stderr else f"ffmpeg exit {result.returncode}"
+            self.statusBar().showMessage(f"Join “{job['label']}” failed: {tail}", 9000)
+        self._pump()
+
+    def _show_join_summary(self, results):
+        lines, last_dir = [], None
+        for job, r in results:
+            if r.cancelled:
+                lines.append(f"• {job['label']}: cancelled")
+            elif r.ok:
+                last_dir = str(Path(r.output).parent)
+                lines.append(f"• {job['label']} → {Path(r.output).name}")
+            else:
+                tail = r.stderr.splitlines()[-1] if r.stderr else f"exit {r.returncode}"
+                lines.append(f"• {job['label']}: FAILED — {tail}")
+        any_fail = any((not r.ok and not r.cancelled) for _, r in results)
+        box = QMessageBox(self)
+        box.setWindowTitle("Joins complete")
+        box.setIcon(QMessageBox.Icon.Warning if any_fail else QMessageBox.Icon.Information)
+        plural = "recording" if len(results) == 1 else "recordings"
+        box.setText(f"Finished {len(results)} {plural}:\n\n" + "\n".join(lines) +
+                    "\n\nOpen one with Open video… to start marking — clips will export instantly.")
+        open_btn = box.addButton("Open folder", QMessageBox.ButtonRole.AcceptRole) if last_dir else None
+        box.addButton(QMessageBox.StandardButton.Close)
+        box.setModal(False)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        if open_btn is not None:
+            box.buttonClicked.connect(
+                lambda b: QDesktopServices.openUrl(QUrl.fromLocalFile(last_dir)) if b is open_btn else None)
+        self._join_done_box = box
+        box.show()
+        self.activateWindow()
+        self._focus_video()
+
+    def _flush_summaries(self):
+        self.export_progress_row.setVisible(False)
+        self._current_job = None
+        self._current_join = None
+        if self._export_results:
+            self._show_export_summary(self._export_results)
+            self._export_results = []
+        if self._join_results:
+            self._show_join_summary(self._join_results)
+            self._join_results = []
 
     def _reset_for_next(self):
         """Blank the marking state after an export is queued, so she can load and

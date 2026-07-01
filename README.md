@@ -236,28 +236,37 @@ number); DJI cameras do the same. To mark across the whole trial as one timeline
 
 1. Click **Join videos…** and select all the chapters of the recording (you can
    select them all at once — they're put in chapter order automatically).
-2. Confirm the order. Leave **Trim trailing black frames at each join** ticked
-   (see below), then choose where to save the joined file.
-3. It's **stream-copied** into one continuous `*.mp4` — no re-encode, no quality
-   loss, and it runs at copy speed (a few minutes for a multi-hour 4K trial,
-   limited mostly by disk). A progress bar shows how far along it is; **Cancel**
-   stops it and removes the partial file.
-4. When it finishes, the joined file loads automatically and you mark as usual.
-   In/Out times and the exported clips all refer to this single joined timeline.
+2. Confirm the order. Leave **Encode to delivery quality now** ticked
+   (recommended — see below), then choose where to save the file.
+3. The job is added to a **background queue** and does **not** auto-load. Do this
+   for each camera view / recording, then **let the queue run overnight** — jobs
+   process one at a time (and never fight an export for the machine). A progress
+   bar shows the current job and how many are queued; **Cancel** stops the running
+   job and drops the rest of the queue.
+4. Next day, **Open video…** an encoded file and mark as usual. Because it's
+   already at delivery quality, **exporting clips is an instant stream copy** —
+   a fraction of a second per clip instead of a re-encode.
 
-The join needs room for the combined file on disk (roughly the sum of the
-chapter sizes). It works for the older `GOPR0078.MP4` / `GP010078.MP4` naming
-too, and for any set of clips with matching codec/resolution/frame-rate.
+**Encode now, clip instantly later.** With the encode box ticked, the whole
+recording is re-encoded **once** to delivery-quality HEVC at your bitrate (the
+**Smaller — HEVC** setting, default ~30 Mbps) with frequent keyframes. That's the
+only encode the footage ever gets — clips then copy straight out of it with no
+quality loss and no waiting. Untick the box for a **fast lossless join** instead
+(original codec, no re-encode) when you just want to stitch chapters; either way
+the join is queued and trailing black frames are trimmed.
+
+The encoded file needs room on disk (a ~30 Mbps HEVC recording is usually
+*smaller* than the raw high-bitrate chapters). It works for the older
+`GOPR0078.MP4` / `GP010078.MP4` naming too, and for any set of clips with matching
+codec/resolution/frame-rate.
 
 **Trimming trailing black (DJI):** some cameras — notably DJI — end every
 auto-split file with a few **black frames**. Joined as-is, those become a brief
-**black flash at each hour boundary** in the continuous video. With the **Trim
-trailing black frames at each join** box ticked (default), the app scans the tail
-of each file, finds exactly where the black starts (ffmpeg's `blackdetect`), and
-stops reading that file there — so the black is dropped while the join stays a
-**lossless stream copy with no real footage lost**. It adds a quick scan of each
-file's last few seconds before the join. Untick it for cameras that don't do this
-(it's harmless either way — a clean file is just left alone).
+**black flash at each hour boundary** in the continuous video. The app **always**
+scans the tail of each file, finds exactly where the black starts (ffmpeg's
+`blackdetect`), and stops reading that file there — so the black is dropped with
+no real footage lost. It adds only a quick scan of each file's last few seconds,
+and is harmless for cameras that don't do this (a clean file is left alone).
 
 ### Hotkeys
 
@@ -420,6 +429,7 @@ tests/
   test_core.py           shared-core + roster unit tests  (python tests/test_core.py)
   smoke_marker.py        headless workflow smoke test  (offscreen)
   test_join.py           stream-copy chapter-join test  (python tests/test_join.py)
+  test_join_encode.py    encode-during-join -> HEVC, then instant clip copy  (python tests/test_join_encode.py)
   test_black_trim.py     trailing-black detect + trim at join (DJI)  (python tests/test_black_trim.py)
   test_cards.py          intro/outro card test (seams decode clean)  (python tests/test_cards.py)
   test_websafe.py        web-safe H.264 + fast-start delivery test  (python tests/test_websafe.py)
