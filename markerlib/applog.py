@@ -17,6 +17,7 @@ import logging
 import os
 import platform
 import sys
+import tempfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -24,9 +25,22 @@ _APP = "DogTrialVideoClipper"
 log = logging.getLogger("clipper")
 
 
+def _test_mode() -> bool:
+    # Offscreen Qt = headless test run; keep app state out of the real user dir.
+    return os.environ.get("QT_QPA_PLATFORM") == "offscreen"
+
+
 def app_data_dir() -> Path:
-    """Per-user directory for persistent app state (queue, recovery)."""
-    if sys.platform == "darwin":
+    """Per-user directory for persistent app state (queue, recovery).
+
+    ``CLIPPER_DATA_DIR`` overrides it; a headless/offscreen run uses a throwaway
+    temp dir so tests never touch (or resume from) the real user's state."""
+    override = os.environ.get("CLIPPER_DATA_DIR")
+    if override:
+        base = Path(override)
+    elif _test_mode():
+        base = Path(tempfile.gettempdir()) / f"{_APP}-test"
+    elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Application Support" / _APP
     elif os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / _APP
@@ -37,7 +51,7 @@ def app_data_dir() -> Path:
 
 
 def log_dir() -> Path:
-    if sys.platform == "darwin":
+    if sys.platform == "darwin" and not (os.environ.get("CLIPPER_DATA_DIR") or _test_mode()):
         d = Path.home() / "Library" / "Logs" / _APP
     else:
         d = app_data_dir() / "logs"

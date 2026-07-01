@@ -73,10 +73,33 @@ def main() -> int:
     (tmp / "queue.json").write_text("{ not json", encoding="utf-8")
     assert session.load_jobs() == []
 
+    # ---- in-progress marking session round-trip -------------------------------
+    marking = {
+        "video": "/vids/view1.mp4", "search": "Interior", "position": 42.5,
+        "in_point": 40.0, "out_point": None,
+        "clips": [Clip(1.0, 3.0, "Amy Ace - Interior", source_participant="Amy Ace")],
+        "roster_all": ["Amy Ace", "Bob Bolt"], "available": ["Bob Bolt"],
+        "run_order": ["Amy Ace", "Bob Bolt"], "intro": "/c/in.png", "outro": None,
+    }
+    session.save_marking(marking)
+    assert session.marking_path().exists()
+    got = session.load_marking()
+    assert got["video"] == "/vids/view1.mp4" and got["search"] == "Interior"
+    assert got["position"] == 42.5 and got["in_point"] == 40.0 and got["out_point"] is None
+    assert [type(c) for c in got["clips"]] == [Clip]
+    assert got["clips"][0].label == "Amy Ace - Interior" and got["clips"][0].source_participant == "Amy Ace"
+    assert got["available"] == ["Bob Bolt"] and got["run_order"] == ["Amy Ace", "Bob Bolt"]
+    # Empty clips -> the recovery file is cleared (nothing to restore).
+    session.save_marking({**marking, "clips": []})
+    assert not session.marking_path().exists()
+    session.save_marking(marking)
+    session.clear_marking()
+    assert session.load_marking() is None
+
     for p in tmp.glob("*"):
         p.unlink()
     tmp.rmdir()
-    print("SESSION OK: export+join jobs persist and restore; clean/corrupt handled")
+    print("SESSION OK: export/join jobs + marking session persist and restore; clean/corrupt handled")
     return 0
 
 

@@ -77,8 +77,9 @@ from markerlib.widgets import ParticipantList
 import cutter
 import logging
 
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 log = logging.getLogger("clipper")
+_SIG_UNSET = object()   # distinct from None (an empty board) so the first autosave always runs
 
 VIDEO_FILTER = (
     "Video files (*.mp4 *.mov *.mkv *.avi *.m4v *.mts *.m2ts *.mxf *.wmv);;All files (*)"
@@ -322,11 +323,107 @@ class MarkerWindow(QMainWindow):
             self.load_video(initial_video)
         self._focus_video()
 
-        # After the window is up, offer to resume any background jobs left over
-        # from a previous session that ended before finishing (crash or quit).
+        # After the window is up, offer to recover anything left over from a
+        # session that ended before finishing (crash or quit): unfinished background
+        # jobs AND the in-progress marking board. Then start the marking autosave so
+        # a future crash mid-marking is recoverable too.
         self._pending_resume = session.load_jobs()
-        if self._pending_resume:
-            QTimer.singleShot(0, self._offer_resume)
+        self._pending_marking = session.load_marking()
+        self._last_marking_sig = _SIG_UNSET
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.setInterval(5000)
+        self._autosave_timer.timeout.connect(self._autosave_marking)
+        QTimer.singleShot(0, self._offer_startup_recovery)
+
+    def _offer_startup_recovery(self):
+        # Headless/offscreen (tests) must never block on a modal recovery prompt.
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            # Sequential (each modal completes before the next) to avoid stacked dialogs.
+            self._offer_resume()             # unfinished background jobs (queue.json)
+            self._offer_marking_restore()    # in-progress marking board (marking.json)
+        self._autosave_timer.start()         # begin autosaving only after recovery is settled
+
+    def _autosave_marking(self):
+        """Persist the live marking board so a crash mid-marking can be restored.
+        Skips redundant writes; an empty board clears the recovery file."""
+        has_state = bool(self.clips) or self.in_point is not None or self.out_point is not None
+        sig = self._marking_signature() if has_state else None
+        if sig == self._last_marking_sig:
+            return
+        self._last_marking_sig = sig
+        if not has_state:
+            session.clear_marking()
+            return
+        session.save_marking({
+            "video": self.video_path,
+            "search": self.search_edit.text(),
+            "position": self.player.position(),
+            "in_point": self.in_point,
+            "out_point": self.out_point,
+            "clips": self.clips,                 # Clip objects; session serializes them
+            "roster_all": list(self._roster_all),
+            "available": list(self._available),
+            "run_order": list(self._run_order),
+            "intro": self.intro_image,
+            "outro": self.outro_image,
+        })
+
+    def _marking_signature(self):
+        return (self.video_path, self.search_edit.text(), self.in_point, self.out_point,
+                tuple((c.start, c.end, c.label, c.exact, c.source_participant) for c in self.clips))
+
+    def _offer_marking_restore(self):
+        data = self._pending_marking
+        self._pending_marking = None
+        if not data or not data.get("clips"):
+            return
+        n = len(data["clips"])
+        vid = data.get("video")
+        vidname = Path(vid).name if vid else "your last video"
+        search = data.get("search") or ""
+        extra = f" — “{search}”" if search else ""
+        keep = QMessageBox.question(
+            self, "Restore last session",
+            f"You had {n} clip(s) in progress on {vidname}{extra} that were never "
+            "exported (the app may have closed unexpectedly).\n\nRestore that marking "
+            "session? (Choosing No discards it — nothing else is affected.)",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        ) == QMessageBox.StandardButton.Yes
+        if not keep:
+            session.clear_marking()
+            log.info("user discarded a restorable marking session (%d clips)", n)
+            return
+        self._restore_marking(data)
+
+    def _restore_marking(self, data):
+        self._roster_all = list(data.get("roster_all", []))
+        self._available = list(data.get("available", self._roster_all))
+        self._run_order = list(data.get("run_order", []))
+        self.clips = list(data.get("clips", []))
+        self.in_point = data.get("in_point")
+        self.out_point = data.get("out_point")
+        self.search_edit.setText(data.get("search") or "")
+        self.intro_image = data.get("intro")
+        self.outro_image = data.get("outro")
+        self._update_card_label("intro")
+        self._update_card_label("outro")
+        self._undo_stack.clear()
+        self._update_undo_ui()
+        vid = data.get("video")
+        if vid and Path(vid).exists():
+            self.load_video(vid)
+            pos = data.get("position")
+            if pos:
+                QTimer.singleShot(500, lambda: self.player.seek(pos))  # after the video loads
+        elif vid:
+            self.statusBar().showMessage(
+                f"Clips restored, but the video moved ({Path(vid).name}). Reopen it with Open video…", 12000)
+        self._refresh_table()
+        self._refresh_roster()
+        self._update_marks_ui()
+        log.info("restored marking session: %d clips, video=%s", len(self.clips), vid)
+        self.statusBar().showMessage(f"Restored {len(self.clips)} clip(s) from your last session.", 8000)
 
     def _offer_resume(self):
         jobs = getattr(self, "_pending_resume", [])
@@ -374,6 +471,7 @@ class MarkerWindow(QMainWindow):
     def closeEvent(self, event):
         """On quit, if background jobs are still running/queued, confirm and save
         them for resume (and stop the worker so ffmpeg isn't left orphaned)."""
+        self._autosave_marking()   # flush the latest marks so un-exported work can be restored
         running = (self._export_worker is not None) or (self._join_worker is not None)
         pending = len(self._export_queue) + len(self._join_queue)
         if running or pending:
@@ -1291,6 +1389,7 @@ class MarkerWindow(QMainWindow):
         self._refresh_table()
         self._select_row(row_to_select)
         self._update_marks_ui()
+        self._autosave_marking()   # a committed clip is saved at once, not on the timer
         self._focus_video()
 
     # ---------------------------------------------------------- clip table
@@ -1865,6 +1964,7 @@ class MarkerWindow(QMainWindow):
         self._refresh_table()
         self._refresh_roster()
         self._update_marks_ui()
+        self._autosave_marking()   # board cleared after export -> drop the recovery file
         self._focus_video()
 
     def _confirm_problems(self, summary: str, action: str) -> bool:

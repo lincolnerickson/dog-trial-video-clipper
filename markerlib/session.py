@@ -120,3 +120,50 @@ def load_jobs() -> list[tuple[str, dict]]:
 
 def clear() -> None:
     save_jobs([])
+
+
+# ---- in-progress marking session (crash recovery while still marking) ----------
+
+def marking_path() -> Path:
+    return app_data_dir() / "marking.json"
+
+
+def save_marking(state: dict) -> None:
+    """Autosave the live marking board. ``state['clips']`` is a list of Clip
+    objects; everything else is JSON-native. No clips -> clear (nothing to
+    restore). Atomic + best-effort: never raises into the UI."""
+    path = marking_path()
+    try:
+        clips = state.get("clips") or []
+        if not clips:
+            path.unlink(missing_ok=True)
+            return
+        payload = dict(state)
+        payload["clips"] = [_clip_to_dict(c) for c in clips]
+        payload["version"] = 1
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        log.exception("could not autosave the marking session")
+
+
+def load_marking() -> dict | None:
+    """Return the last marking session (clips rebuilt as Clip objects), or None."""
+    path = marking_path()
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["clips"] = [_clip_from_dict(c) for c in data.get("clips", [])]
+        return data
+    except Exception:
+        log.exception("could not read the saved marking session; ignoring it")
+        return None
+
+
+def clear_marking() -> None:
+    try:
+        marking_path().unlink(missing_ok=True)
+    except OSError:
+        pass

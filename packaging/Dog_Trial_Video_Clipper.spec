@@ -75,7 +75,7 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "Dog Trial Video Clipper",
         "CFBundleDisplayName": "Dog Trial Video Clipper",
-        "CFBundleShortVersionString": "1.0.15",
+        "CFBundleShortVersionString": "1.0.16",
         "NSHighResolutionCapable": True,
         "LSMinimumSystemVersion": "11.0",
     },

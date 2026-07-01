@@ -270,6 +270,16 @@ and is harmless for cameras that don't do this (a clean file is left alone).
 
 ### Background queue, logs & crash recovery
 
+Your work is protected at **every stage** — while marking, while queued, and after
+export:
+
+- **Mid-marking:** the clip list you're building is autosaved continuously (and the
+  moment each clip is added). If the app closes before you export, the next launch
+  asks **"Restore last session?"** and brings back the clips, marks, roster, search
+  label, and video. A clean board (everything exported) leaves nothing to restore.
+- **After export:** the clip list is also written as `<search> clips.csv` in the
+  output folder (reload it any time with **Load clip CSV…**).
+
 Exports and joins run in a **single background queue** (one job at a time). If the
 app **crashes or is quit** while jobs are running or queued, they are **not lost**:
 
