@@ -33,7 +33,7 @@ from __future__ import annotations
 
 from abc import abstractmethod
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QObject, QUrl, Signal
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
@@ -187,6 +187,16 @@ class QtVideoPlayer(VideoPlayer):
         self._prime = False       # a prime cycle is currently in progress
         self._has_primed = False  # priming happens once per file, not per buffer event
 
+        # Scrub coalescer: while dragging, a burst of seek() calls collapses into a
+        # SINGLE in-flight seek that always chases the LATEST target, so heavy
+        # HEVC/4K decodes never back up (what made scrubbing choppy vs. an NLE).
+        self._seek_pending_ms: int | None = None
+        self._seek_inflight = False
+        self._seek_watchdog = QTimer(self)
+        self._seek_watchdog.setSingleShot(True)
+        self._seek_watchdog.setInterval(150)
+        self._seek_watchdog.timeout.connect(self._on_seek_watchdog)
+
         self._sink.videoFrameChanged.connect(self._on_frame)
         self._player.positionChanged.connect(self._on_position)
         self._player.durationChanged.connect(self._on_duration)
@@ -229,9 +239,43 @@ class QtVideoPlayer(VideoPlayer):
         return max(self._player.duration(), 0) / 1000.0
 
     def seek(self, seconds: float) -> None:
-        # Seeking emits a fresh frame to the sink even while paused, so the
-        # canvas updates as the user scrubs.
-        self._player.setPosition(int(round(seconds * 1000)))
+        # Coalesce: record the newest target and, if no seek is in flight, issue it
+        # now. A flurry of drag positions collapses to the latest one -- seeking
+        # emits a fresh frame even while paused, so the canvas follows the cursor
+        # smoothly instead of the decoder queueing (and lagging behind) every move.
+        self._seek_pending_ms = max(0, int(round(seconds * 1000)))
+        if not self._seek_inflight:
+            self._issue_seek()
+
+    def _issue_seek(self) -> None:
+        if self._seek_pending_ms is None:
+            self._seek_inflight = False
+            self._seek_watchdog.stop()
+            return
+        target = self._seek_pending_ms
+        self._seek_pending_ms = None
+        self._seek_inflight = True
+        self._player.setPosition(target)
+        self._seek_watchdog.start()   # release if this seek yields no new frame
+
+    def _settle_seek_after_frame(self) -> None:
+        """A frame landed, so the in-flight seek is done: chase the newest target
+        if the user kept dragging, otherwise go idle."""
+        if not self._seek_inflight:
+            return
+        self._seek_watchdog.stop()
+        if self._seek_pending_ms is not None:
+            self._issue_seek()
+        else:
+            self._seek_inflight = False
+
+    def _on_seek_watchdog(self) -> None:
+        # The seek produced no visible frame within the timeout (e.g. a sub-frame
+        # move); don't stall -- continue to the newest target or go idle.
+        if self._seek_pending_ms is not None:
+            self._issue_seek()
+        else:
+            self._seek_inflight = False
 
     def set_rate(self, rate: float) -> None:
         self._rate = rate
@@ -255,6 +299,9 @@ class QtVideoPlayer(VideoPlayer):
                 # Paint immediately when not actively playing, so scrubbing/
                 # stepping shows each frame live instead of a stale one.
                 self._canvas.set_image(image, immediate=not self._user_playing)
+        # A new frame means any in-flight scrub seek has landed -- immediately
+        # chase the latest drag position so the picture keeps up with the cursor.
+        self._settle_seek_after_frame()
         # Priming: we briefly played to decode frame 0; now that it's shown,
         # pause again so we sit on the first frame.
         if self._prime and not self._user_playing:

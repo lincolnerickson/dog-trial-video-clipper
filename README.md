@@ -436,6 +436,7 @@ tests/
   test_hotkeys.py        ↑/↓ + I/O marking hotkeys fire correctly  (offscreen)
   test_run_order.py      running order saved from view 1 drives Enter in later views  (offscreen)
   test_undo.py           undo reverses the last action (one gesture = one step)  (offscreen)
+  test_scrub.py          scrub seeks coalesce to the latest target (smooth scrubbing)  (offscreen)
   diagnose_video.py      report a file's codec/frames if video won't show
   render_check.py        confirm frames are painted to the canvas
 sample/                  generated 4K test video + sample roster/clip CSVs (safe to delete)
