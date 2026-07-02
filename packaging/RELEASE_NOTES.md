@@ -1,5 +1,13 @@
 Self-contained macOS app for cutting one long 4K dog-trial recording into one named clip per run. Nothing to install — Python, the GUI, and ffmpeg are bundled.
 
+## What's new in 1.0.17
+
+- **Fixed: crash report on quit while a job was encoding.** Quitting during an export/join now stops ffmpeg immediately and exits cleanly; the job still resumes on next launch.
+- **Fixed: interrupted or cancelled jobs could leave a broken video file** (one that won't open) in the output folder. Failed and cancelled outputs are now cleaned up automatically.
+- **Fixed: Cancel could take minutes** to actually stop a long encode; it now stops within seconds.
+- **Fixed: editing a clip, then deleting or reordering another row, could save the edit onto the wrong clip.**
+- Reliability fixes around quitting mid-batch: jobs no longer restart during shutdown, and cancelled jobs no longer come back after a crash.
+
 ## Download
 
 - **Apple Silicon (M1/M2/M3/M4) — `DogTrialVideoClipper-macOS-arm64.zip`** ← use this for an M2 Pro

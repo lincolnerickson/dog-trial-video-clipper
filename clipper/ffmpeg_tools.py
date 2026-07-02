@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -38,6 +39,89 @@ from . import timecode
 
 class FFmpegNotFound(RuntimeError):
     pass
+
+
+# --------------------------------------------------------- process registry
+#
+# A worker thread runs one ffmpeg child at a time, and cancellation used to be
+# a flag polled *between* pipe reads -- so an ffmpeg that went quiet (stalled
+# external disk, hung encode) left the worker blocked in read() with no way to
+# stop it, and quitting the app then aborted in Qt's QThread teardown. The
+# registry maps each spawning thread's ident to its live Popen so the GUI
+# thread can kill the child directly: the pipe hits EOF and the blocked read
+# returns immediately.
+
+_active_procs: dict[int, subprocess.Popen] = {}
+_cancelled_tids: set[int] = set()
+_active_procs_lock = threading.Lock()
+
+
+def _kill(proc: subprocess.Popen, force: bool = False) -> None:
+    if proc.poll() is None:
+        try:
+            proc.kill() if force else proc.terminate()
+        except OSError:
+            pass
+
+
+def _track(proc: subprocess.Popen) -> None:
+    tid = threading.get_ident()
+    with _active_procs_lock:
+        _active_procs[tid] = proc
+        cancelled = tid in _cancelled_tids
+    # A cancel that landed between two spawns found nothing to kill; honour it
+    # now so a fresh (possibly minutes-long) child doesn't run to completion.
+    if cancelled:
+        _kill(proc)
+
+
+def _untrack() -> None:
+    with _active_procs_lock:
+        _active_procs.pop(threading.get_ident(), None)
+
+
+def terminate_thread_ffmpeg(thread_id: int, force: bool = False) -> None:
+    """Kill the ffmpeg child (if any) thread ``thread_id`` is running, and mark
+    the thread cancelled so a child spawned a moment later dies too.
+
+    Called from the GUI thread on cancel/quit; a no-op if that thread has no
+    active child or the child already exited. ``force`` uses SIGKILL for a
+    child that ignored an earlier terminate (it can't be blocked, so quit
+    never orphans a live encoder writing to the output file)."""
+    with _active_procs_lock:
+        _cancelled_tids.add(thread_id)
+        proc = _active_procs.get(thread_id)
+    if proc is not None:
+        _kill(proc, force)
+
+
+def clear_thread_cancellation(thread_id: int) -> None:
+    """Forget a cancel mark once its worker thread has fully unwound.
+
+    Thread idents are recycled by the OS; without this, a future worker
+    reusing the ident would have every ffmpeg it spawns killed on arrival."""
+    with _active_procs_lock:
+        _cancelled_tids.discard(thread_id)
+
+
+def _run_tracked(cmd: list[str], **popen_kwargs) -> subprocess.CompletedProcess:
+    """``subprocess.run`` equivalent whose child is registered while it runs,
+    so :func:`terminate_thread_ffmpeg` can kill it from another thread.
+
+    Text pipes decode as UTF-8 (what ffmpeg emits) rather than the locale
+    codec -- on Windows (cp1252) a filename like "ō" in ffmpeg's stderr would
+    otherwise raise UnicodeDecodeError and break run_cut's never-raises
+    contract, killing a whole batch over one clip's metadata."""
+    if popen_kwargs.get("text"):
+        popen_kwargs.setdefault("encoding", "utf-8")
+        popen_kwargs.setdefault("errors", "replace")
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    _track(proc)
+    try:
+        stdout, stderr = proc.communicate()
+    finally:
+        _untrack()
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def find_ffmpeg() -> str:
@@ -192,13 +276,21 @@ def run_cut(
         return CutResult(ok=True, output=out_path, command=cmd)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    proc = subprocess.run(
+    proc = _run_tracked(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
     )
     ok = proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+    if not ok:
+        # A failed or killed cut must not leave a truncated-but-plausible mp4
+        # in the delivery folder (a resumed batch would then shadow it with a
+        # "name (2).mp4" and the corrupt file gets handed out).
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
     return CutResult(
         ok=ok,
         output=out_path,
@@ -286,7 +378,7 @@ def probe_streams(ffmpeg: str, path: str | Path) -> StreamInfo:
     """Best-effort first-video + first-audio stream facts, parsed from ffmpeg's
     ``-i`` banner (so no separate ffprobe is needed -- imageio-ffmpeg only ships
     ffmpeg). Missing fields stay at their dataclass defaults."""
-    proc = subprocess.run(
+    proc = _run_tracked(
         [ffmpeg, "-hide_banner", "-i", str(path)],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
     )
@@ -363,7 +455,7 @@ def _first_working_encoder(ffmpeg: str, candidates: Sequence[str], fallback: str
     runtime without the hardware -- so each candidate is proven for real.
     """
     for enc in candidates:
-        proc = subprocess.run(
+        proc = _run_tracked(
             [ffmpeg, "-hide_banner", "-loglevel", "error",
              "-f", "lavfi", "-i", "color=c=black:s=320x240",
              "-frames:v", "1", "-c:v", enc, "-f", "null", "-"],
@@ -452,7 +544,7 @@ def _intro_pix_fmt(src_pix_fmt: str) -> str:
 
 
 def _run_quiet(cmd: list[str]) -> tuple[int, str]:
-    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = _run_tracked(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     return proc.returncode, (proc.stderr or "").strip()
 
 
@@ -714,6 +806,11 @@ def run_cut_with_cards(
             vcodec=body_codec, has_audio=info.has_audio,
         )
         ok = rc == 0 and out_path.exists() and out_path.stat().st_size > 0
+        if not ok:
+            try:
+                out_path.unlink(missing_ok=True)   # no truncated final mp4 left behind
+            except OSError:
+                pass
         return CutResult(
             ok, out_path, bcmd, rc,
             "" if ok else f"card concat failed: {_last_line(err)}",
@@ -775,7 +872,7 @@ def detect_trailing_black(
         "-an", "-vf", f"blackdetect=d={min_black}:pix_th={pix_th}",
         "-f", "null", "-",
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    proc = _run_tracked(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     text = proc.stderr or ""
     starts = [float(x) for x in _BLACK_START_RE.findall(text)]
     ends = [float(x) for x in _BLACK_END_RE.findall(text)]
@@ -798,7 +895,7 @@ def probe_duration(ffmpeg: str, path: str | Path) -> float | None:
     ffprobe is required -- ``imageio-ffmpeg`` only ships ffmpeg. Returns None if
     the duration can't be parsed.
     """
-    proc = subprocess.run(
+    proc = _run_tracked(
         [ffmpeg, "-hide_banner", "-i", str(path)],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
     )
@@ -917,18 +1014,30 @@ def concat_videos(
         # stderr -> a file (not a pipe) so it can never fill and deadlock while
         # we stream the progress pipe.
         with open(err_path, "w", encoding="utf-8") as errfh:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfh, text=True)
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                if progress and line.startswith("out_time="):
-                    secs = _parse_progress_seconds(line.split("=", 1)[1])
-                    if secs is not None:
-                        progress(secs, total_duration)
-                if cancel and cancel():
-                    cancelled = True
-                    proc.terminate()
-                    break
-            proc.wait()
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=errfh, text=True,
+                                    encoding="utf-8", errors="replace")
+            _track(proc)
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    if progress and line.startswith("out_time="):
+                        secs = _parse_progress_seconds(line.split("=", 1)[1])
+                        # ffmpeg emits garbage negatives before the first
+                        # packet is muxed; don't underflow the progress bar.
+                        if secs is not None and secs >= 0:
+                            progress(secs, total_duration)
+                    if cancel and cancel():
+                        cancelled = True
+                        proc.terminate()
+                        break
+                proc.wait()
+            finally:
+                _untrack()
+        # Cancel-on-quit kills the child directly (terminate_thread_ffmpeg) to
+        # unblock the pipe read, so the loop above may end at EOF without ever
+        # polling ``cancel``; a cancel request + failed child means cancelled.
+        if not cancelled and cancel and cancel() and proc.returncode != 0:
+            cancelled = True
 
         stderr = ""
         try:
@@ -944,6 +1053,11 @@ def concat_videos(
             return ConcatResult(False, out_path, cmd, proc.returncode, "cancelled", cancelled=True)
 
         ok = proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+        if not ok:
+            try:
+                out_path.unlink(missing_ok=True)   # failed join: drop the partial file
+            except OSError:
+                pass
         return ConcatResult(ok, out_path, cmd, proc.returncode, stderr)
     finally:
         for p in (list_path, err_path):

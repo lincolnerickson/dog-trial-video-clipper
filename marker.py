@@ -29,6 +29,7 @@ import functools
 import os
 import re
 import sys
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, QUrl, Signal
@@ -70,6 +71,8 @@ from clipper.ffmpeg_tools import (
     find_ffmpeg,
     find_hevc_encoder,
     probe_duration,
+    clear_thread_cancellation,
+    terminate_thread_ffmpeg,
 )
 from markerlib import applog, roster, session
 from markerlib.player import create_player
@@ -77,7 +80,7 @@ from markerlib.widgets import ParticipantList
 import cutter
 import logging
 
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.17"
 log = logging.getLogger("clipper")
 _SIG_UNSET = object()   # distinct from None (an empty board) so the first autosave always runs
 
@@ -167,7 +170,36 @@ class VideoArea(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
 
-class ExportWorker(QThread):
+class FFmpegWorker(QThread):
+    """Base for worker threads that drive ffmpeg children.
+
+    ``requestInterruption`` alone is only polled between pipe reads / rows, so
+    an ffmpeg that goes quiet (stalled disk, hung encode) leaves the thread
+    blocked forever -- quitting then destroys a running QThread and Qt aborts
+    (the 1.0.16 shutdown crash). ``stop()`` also kills the thread's in-flight
+    ffmpeg child, which unblocks any pipe read immediately."""
+
+    def run(self):
+        tid = self._thread_ident = threading.get_ident()
+        try:
+            self._work()
+        finally:
+            self._thread_ident = None
+            clear_thread_cancellation(tid)   # OS recycles idents; don't curse the next worker
+
+    def _work(self):
+        raise NotImplementedError
+
+    def stop(self, force: bool = False):
+        """Interrupt the worker and kill its in-flight ffmpeg (``force`` uses
+        SIGKILL, for a child that ignored an earlier terminate)."""
+        self.requestInterruption()
+        tid = getattr(self, "_thread_ident", None)
+        if tid is not None:
+            terminate_thread_ffmpeg(tid, force=force)
+
+
+class ExportWorker(FFmpegWorker):
     """Runs the batch cut off the UI thread; reports per-row progress."""
 
     rowDone = Signal(int, int, object)   # rownum, total, RowOutcome
@@ -187,7 +219,7 @@ class ExportWorker(QThread):
         self.crf = crf
         self.bitrate = bitrate
 
-    def run(self):
+    def _work(self):
         try:
             result = cutter.run_batch(
                 self.ffmpeg, self.video, self.rows, self.out_dir,
@@ -210,7 +242,7 @@ class ExportWorker(QThread):
         self.finishedResult.emit(result)
 
 
-class JoinWorker(QThread):
+class JoinWorker(FFmpegWorker):
     """Stream-copy joins several chapters into one file off the UI thread.
 
     When ``trim_black`` is set, each input's tail is scanned first and any
@@ -233,7 +265,7 @@ class JoinWorker(QThread):
         self.bitrate = bitrate
         self.gop = gop
 
-    def run(self):
+    def _work(self):
         try:
             outpoints = None
             if self.trim_black:
@@ -280,6 +312,7 @@ class MarkerWindow(QMainWindow):
         self._ffmpeg: str | None = None
         self._export_worker: ExportWorker | None = None
         self._join_worker: JoinWorker | None = None
+        self._closing = False    # quit confirmed: late worker signals must not pump
         # Background job queues: exports (each captures its own source video +
         # clip snapshot) and joins (encode a whole recording overnight). Only one
         # heavy job runs at a time -- see _pump(); joins and exports never fight.
@@ -486,12 +519,31 @@ class MarkerWindow(QMainWindow):
             if not keep:
                 event.ignore()
                 return
+            # The stopped worker's queued finishedResult still gets delivered
+            # after this method returns, before exec() exits; without this flag
+            # its done-slot would _pump() -- starting a new job mid-teardown
+            # (QThread destroyed running -> abort) or re-persisting the now-idle
+            # state and deleting the resume file written just below.
+            self._closing = True
             self._persist_queues()            # capture running + queued for resume
-            for w in (self._export_worker, self._join_worker):
-                if w:
-                    w.requestInterruption()
-                    w.wait(3000)
+            workers = [w for w in (self._export_worker, self._join_worker) if w]
+            for w in workers:
+                w.stop()                      # interrupt + kill its in-flight ffmpeg
+            stuck = False
+            for w in workers:
+                if not w.wait(5000):
+                    w.stop(force=True)        # SIGKILL: a terminate-ignoring ffmpeg
+                    stuck = not w.wait(2000) or stuck
             log.info("quit with %d unfinished job(s); saved for resume", n)
+            if stuck:
+                # A worker thread is still blocked (e.g. ffmpeg unkillable on a
+                # stalled disk). Normal interpreter shutdown would destroy a
+                # running QThread and Qt aborts -- the user sees a crash report
+                # for a quit they asked for. Everything is persisted for resume,
+                # so skip Python finalization entirely and exit clean.
+                log.warning("a worker is still running at quit; forcing immediate exit")
+                logging.shutdown()
+                os._exit(0)
         else:
             session.clear()                   # clean exit -> nothing to resume
         super().closeEvent(event)
@@ -1462,6 +1514,8 @@ class MarkerWindow(QMainWindow):
             self._restore_participant(clip.source_participant)
         if self.editing_row == row:
             self.clear_marks()
+        elif self.editing_row is not None and row < self.editing_row:
+            self.editing_row -= 1   # keep the edit pointing at the same clip
         self._refresh_table()
         self._select_row(min(row, len(self.clips) - 1))
         self.statusBar().showMessage(f"Deleted clip: {name}", 3000)
@@ -1472,6 +1526,10 @@ class MarkerWindow(QMainWindow):
         if row is None or row == 0:
             return
         self.clips[row - 1], self.clips[row] = self.clips[row], self.clips[row - 1]
+        if self.editing_row == row:
+            self.editing_row = row - 1   # the edited clip moved with the swap
+        elif self.editing_row == row - 1:
+            self.editing_row = row
         self._refresh_table()
         self._select_row(row - 1)
 
@@ -1481,6 +1539,10 @@ class MarkerWindow(QMainWindow):
         if row is None or row >= len(self.clips) - 1:
             return
         self.clips[row + 1], self.clips[row] = self.clips[row], self.clips[row + 1]
+        if self.editing_row == row:
+            self.editing_row = row + 1   # the edited clip moved with the swap
+        elif self.editing_row == row + 1:
+            self.editing_row = row
         self._refresh_table()
         self._select_row(row + 1)
 
@@ -1745,6 +1807,8 @@ class MarkerWindow(QMainWindow):
         """Run one background job at a time. Exports (interactive) go first, then
         queued joins; when everything drains, show the summaries. Called whenever a
         job is queued or one finishes -- so joins and exports never fight."""
+        if self._closing:
+            return   # late finishedResult during quit: resume state is already saved
         if self._export_worker is not None or self._join_worker is not None:
             return
         if self._export_queue:
@@ -1798,7 +1862,11 @@ class MarkerWindow(QMainWindow):
         self._join_queue.clear()
         for worker in (self._export_worker, self._join_worker):
             if worker:
-                worker.requestInterruption()
+                worker.stop()
+        # The user discarded everything, running job included -- reflect that on
+        # disk NOW, not when the worker's done-slot eventually pumps; a crash in
+        # between would otherwise offer to "resume" the cancelled jobs.
+        session.save_jobs([])
         self.export_cancel_btn.setEnabled(False)
         self.export_status.setText("Cancelling…")
         if dropped:
@@ -1810,6 +1878,11 @@ class MarkerWindow(QMainWindow):
         self._update_export_status(rownum, total)
 
     def _on_export_done(self, result, job):
+        if self._export_worker is not None:
+            # finishedResult is emitted a few instants before run() returns;
+            # dropping the last reference while the thread is still exiting
+            # destroys a running QThread (fatal abort). wait() is microseconds.
+            self._export_worker.wait()
         self._export_worker = None
         self._export_results.append((job, result))
         written = len(result.written)
@@ -1891,6 +1964,8 @@ class MarkerWindow(QMainWindow):
         self._update_join_status(seconds, total)
 
     def _on_join_done(self, result, job):
+        if self._join_worker is not None:
+            self._join_worker.wait()   # see _on_export_done: never drop a running QThread
         self._join_worker = None
         self._join_results.append((job, result))
         if result.cancelled:
