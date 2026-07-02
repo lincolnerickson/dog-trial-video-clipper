@@ -1,9 +1,10 @@
 name: Build macOS app
 
 # Builds the self-contained "Dog Trial Video Clipper.app" on GitHub's macOS
-# runners for both Apple Silicon (arm64) and Intel (x86_64), and uploads each as
-# a downloadable zip. Trigger it by hand (Actions tab -> Run workflow) or by
-# pushing a tag like v1.0.0.
+# runner (Apple Silicon only -- GitHub retired the free Intel macos-13 image,
+# so an x86_64 leg would queue forever) and uploads it as a downloadable zip.
+# Trigger it by hand (Actions tab -> Run workflow) or by pushing a tag like
+# v1.0.0.
 on:
   workflow_dispatch:
   push:
@@ -21,8 +22,6 @@ jobs:
         include:
           - runner: macos-14   # Apple Silicon
             arch: arm64
-          - runner: macos-13   # Intel
-            arch: x86_64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4

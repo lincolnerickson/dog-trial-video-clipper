@@ -11,9 +11,8 @@ Self-contained macOS app for cutting one long 4K dog-trial recording into one na
 ## Download
 
 - **Apple Silicon (M1/M2/M3/M4) — `DogTrialVideoClipper-macOS-arm64.zip`** ← use this for an M2 Pro
-- **Intel Macs — `DogTrialVideoClipper-macOS-x86_64.zip`**
 
-Not sure which?  menu → **About This Mac**: "Apple chip" → arm64; "Intel" → x86_64.
+Requires an Apple Silicon Mac ( menu → **About This Mac** shows an "Apple" chip). There is no Intel build — GitHub retired its free Intel macOS runners.
 
 ## First launch (do this once)
 
